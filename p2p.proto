@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package p2pvector;
+
+service VectorStore {
+  rpc SearchSimilar (SearchRequest) returns (SearchResponse) {}
+}
+
+message Vector {
+  bytes values = 1;
+}
+
+message Peer {
+  string ip = 1;
+  int32 port = 2;
+}
+
+message SearchRequest {
+  Vector query = 1;
+  int32 k = 2;
+}
+
+message SearchResponse {
+  repeated Peer nearest_peers = 1;
+  repeated float distances = 2;
+}
