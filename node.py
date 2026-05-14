@@ -53,7 +53,7 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
         return response
 
 
-async def serve(port, node_id=0):
+async def serve(port, bootstrap_port=None, node_id=0):
     local_graph = LocalGraphState()
 
     try:
@@ -76,12 +76,13 @@ async def serve(port, node_id=0):
         VectorStoreServicer(port, local_graph), server
     )
     server.add_insecure_port(f'[::]:{port}')
-    print(f"Starte gRPC Server auf Port {port}...")
     await server.start()
     await server.wait_for_termination()
 
 if __name__ == '__main__':
-    # Argumente: Port und Node-ID (bestimmt den Daten-Chunk)
+    # Parameter auslesen: Port, Bootstrap-Port, Node-ID
     p = int(sys.argv[1]) if len(sys.argv) > 1 else 5000
-    n_id = int(sys.argv[2]) if len(sys.argv) > 2 else 0
-    asyncio.run(serve(p, n_id))
+    b = sys.argv[2] if len(sys.argv) > 2 else None
+    n_id = int(sys.argv[3]) if len(sys.argv) > 3 else 0
+    
+    asyncio.run(serve(p, b, n_id))
