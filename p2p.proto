@@ -18,6 +18,8 @@ message Peer {
 message SearchRequest {
   Vector query = 1;
   int32 k = 2;
+  int32 ttl = 3;                     
+  repeated string visited_peers = 4;
 }
 
 message SearchResponse {
