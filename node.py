@@ -10,7 +10,7 @@ class LocalGraphState:
     def __init__(self, dimension=128, M=32):
         self.dimension = dimension
         self.local_index = faiss.IndexHNSWFlat(dimension, M)
-        self.neighbors = {}
+        self.neighbors = []
 
     def insert_local(self, vector):
         vec_np = np.array([vector], dtype=np.float32)
@@ -32,37 +32,33 @@ class LocalGraphState:
 
 
 class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
-    def __init__(self, port, local_graph, router, neighbor_port):
+    def __init__(self, port, local_graph, router):
         self.port = port
         self.local_graph = local_graph
         self.router = router
-        self.neighbor_port = neighbor_port
 
     async def SearchSimilar(self, request, context):
-        
         query_vec = np.frombuffer(request.query.values, dtype=np.float32).tolist()
-
+        visited = list(request.visited_peers)
+        
         local_res = self.local_graph.search_local(query_vec, request.k, "127.0.0.1", self.port)
-        
-        network_res = []
-        if self.neighbor_port:
-            network_res = await self.router.ask_neighbor(self.neighbor_port, query_vec, request.k)
-        
-        all_results = local_res + network_res
-        all_results.sort(key=lambda x: x[2])
-        
-        unique_results = []
-        seen = set()
-        for ip, port, dist in all_results:
-            key = (ip, port, round(dist, 5))
-            if key not in seen:
-                seen.add(key)
-                unique_results.append((ip, port, dist))
-                
-        best_k = unique_results[:request.k]
+        combined_res = list(local_res)
+
+        if request.ttl > 0:
+            remote_res = await self.router.distributed_search(
+                self.local_graph.neighbors,
+                query_vec,
+                request.k,
+                request.ttl,
+                visited
+            )
+            combined_res.extend(remote_res)
+
+        combined_res.sort(key=lambda x: x[2])
+        final_best_k = combined_res[:request.k]
 
         response = p2p_pb2.SearchResponse()
-        for ip, port, dist in best_k:
+        for ip, port, dist in final_best_k:
             p = response.nearest_peers.add()
             p.ip = ip
             p.port = port
@@ -86,15 +82,22 @@ async def serve(port, bootstrap_port=None, node_id=0):
         print(f"[Node {port}] ID {node_id}: {len(my_chunk)} Vektoren geladen.")
     except FileNotFoundError:
         print(f"[Node {port}] Fehler: dataset.npy nicht gefunden!")
-       
+
+    if bootstrap_port and bootstrap_port != "None":
+        local_graph.neighbors.append(f"127.0.0.1:{bootstrap_port}")
+
     from protocol import DistributedRouter
-    router = DistributedRouter()
+    router = DistributedRouter("127.0.0.1", port)
     
     server = grpc.aio.server()
+    
     p2p_pb2_grpc.add_VectorStoreServicer_to_server(
-        VectorStoreServicer(port, local_graph, router, bootstrap_port), server
+        VectorStoreServicer(port, local_graph, router), server
     )
     server.add_insecure_port(f'[::]:{port}')
+    
+    print(f"[Node {port}] Online. Bekannte Nachbarn: {local_graph.neighbors}")
+    
     await server.start()
     await server.wait_for_termination()
 
