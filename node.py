@@ -29,6 +29,10 @@ class LocalGraphState:
 
         results.sort(key=lambda x: x[2])
         return results[:k]
+    
+    def add_neighbor(self, target):
+        if target not in self.neighbors:
+            self.neighbors.append(target)
 
 
 class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
@@ -40,6 +44,11 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
     async def SearchSimilar(self, request, context):
         query_vec = np.frombuffer(request.query.values, dtype=np.float32).tolist()
         visited = list(request.visited_peers)
+        
+        if request.sender_port > 0:
+            sender_target = f"{request.sender_ip}:{request.sender_port}"
+            self.local_graph.add_neighbor(sender_target)
+            print(f"[Node {self.port} TTL={request.ttl}] Anfrage empfangen von {sender_target}")
         
         local_res = self.local_graph.search_local(query_vec, request.k, "127.0.0.1", self.port)
         combined_res = list(local_res)

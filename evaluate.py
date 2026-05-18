@@ -21,7 +21,9 @@ def test_search():
         query=p2p_pb2.Vector(values=query_bytes),
         k=5,
         ttl=0,
-        visited_peers=[]
+        visited_peers=[],
+        sender_ip="127.0.0.1",
+        sender_port=9999
     )
     start = time.time()
     res_local = stub.SearchSimilar(req_local)
@@ -30,12 +32,14 @@ def test_search():
     for p, d in zip(res_local.nearest_peers, res_local.distances):
         print(f"  {p.ip}:{p.port} -> Distanz: {d:.2f}")
 
-    print("\n--- Netzwerk: Verteilte Suche (TTL=2) ---")
+    print("\n--- Netzwerk: Verteilte Suche (TTL=3) ---")
     req_dist = p2p_pb2.SearchRequest(
         query=p2p_pb2.Vector(values=query_bytes),
         k=5,
-        ttl=2,
-        visited_peers=[]
+        ttl=3,
+        visited_peers=[],
+        sender_ip="127.0.0.1",
+        sender_port=9999
     )
     start = time.time()
     res_dist = stub.SearchSimilar(req_dist)

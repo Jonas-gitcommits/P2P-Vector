@@ -26,7 +26,9 @@ class DistributedRouter:
             query=vec, 
             k=k, 
             ttl=ttl, 
-            visited_peers=visited_peers
+            visited_peers=visited_peers,
+            sender_ip=self.my_ip,        
+            sender_port=self.my_port
         )
         
         try:
