@@ -7,7 +7,7 @@ import faiss
 import random
 import sys
 
-MAX_NEIGHBORS = 3
+MAX_NEIGHBORS = 8
 
 class LocalGraphState:
     def __init__(self, dimension=128, M=32):
@@ -54,7 +54,7 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
         if request.sender_port > 0 and request.sender_port != 9999:
             self.local_graph.add_neighbor_edge(request.sender_ip, request.sender_port, query_vec)
             sender_target = f"{request.sender_ip}:{request.sender_port}"
-            print(f"[Node {self.port} TTL={request.ttl}] Anfrage empfangen von {sender_target}")
+            # print(f"[Node {self.port} TTL={request.ttl}] Anfrage empfangen von {sender_target}")
         
         local_res = self.local_graph.search_local(query_vec, request.k, "127.0.0.1", self.port)
         combined_res = list(local_res)

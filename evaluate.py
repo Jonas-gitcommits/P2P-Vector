@@ -8,6 +8,7 @@ import faiss
 from config import NUM_NODES, SUBSET_SIZE
 
 NUM_QUERIES = 100
+NUM_RUNS = 3
 DIMENSION = 128
 K = 3
 TTL = 4
@@ -56,55 +57,58 @@ def run_evaluation():
 
     print("Warte 5s für Gossip-Konvergenz...")
     time.sleep(5)
- 
-    random.seed(42)
-    entry_nodes = [random.choice(ALL_NODES) for _ in queries]
- 
+
     channels = {n: grpc.insecure_channel(n) for n in ALL_NODES}
     stubs = {n: p2p_pb2_grpc.VectorStoreStub(channels[n]) for n in ALL_NODES}
- 
-    latencies = []
-    recalls = []
-    errors = 0
- 
-    print(f"Starte {NUM_QUERIES} Queries (TTL={TTL}, K={K})...")
-    for i, query_vector in enumerate(queries):
-        entry_node = entry_nodes[i]
-        gt_max = gt_max_dists[i]
- 
-        query_bytes = np.array(query_vector, dtype=np.float32).tobytes()
-        vec = p2p_pb2.Vector(values=query_bytes)
-        request = p2p_pb2.SearchRequest(
-            query=vec,
-            k=K,
-            ttl=TTL,
-            visited_peers=[],
-            sender_ip="127.0.0.1",
-            sender_port=9999, 
-        )
- 
-        try:
-            t0 = time.time()
-            response = stubs[entry_node].SearchSimilar(request, timeout=5.0)
-            latencies.append((time.time() - t0) * 1000)
- 
-            matches = sum(1 for d in response.distances if d <= gt_max + 1e-5)
-            recalls.append(min(matches, K) / K)
-        except grpc.RpcError as e:
-            errors += 1
-           
+
+    run_recalls = []
+    run_latencies = []
+
+    for run_id in range(NUM_RUNS):
+        random.seed(42 + run_id)
+        entry_nodes = [random.choice(ALL_NODES) for _ in queries]
+
+        latencies = []
+        recalls = []
+
+        print(f"Run {run_id + 1}/{NUM_RUNS} ({NUM_QUERIES} Queries, TTL={TTL}, K={K})...")
+        for i, query_vector in enumerate(queries):
+            entry_node = entry_nodes[i]
+            gt_max = gt_max_dists[i]
+
+            query_bytes = np.array(query_vector, dtype=np.float32).tobytes()
+            vec = p2p_pb2.Vector(values=query_bytes)
+            request = p2p_pb2.SearchRequest(
+                query=vec,
+                k=K,
+                ttl=TTL,
+                visited_peers=[],
+                sender_ip="127.0.0.1",
+                sender_port=9999,
+            )
+
+            try:
+                t0 = time.time()
+                response = stubs[entry_node].SearchSimilar(request, timeout=5.0)
+                latencies.append((time.time() - t0) * 1000)
+                matches = sum(1 for d in response.distances if d <= gt_max + 1e-5)
+                recalls.append(min(matches, K) / K)
+            except grpc.RpcError:
+                pass
+
+        if recalls:
+            run_recalls.append(np.mean(recalls) * 100)
+            run_latencies.append(np.mean(latencies))
+
     for ch in channels.values():
         ch.close()
- 
-    print("\n" + "=" * 60)
-    print(f"Queries erfolgreich: {len(latencies)}/{NUM_QUERIES}  (Fehler: {errors})")
-    if latencies:
+
+    if run_recalls:
+        print("\n" + "=" * 60)
         print(f"Recall:      {np.mean(recalls) * 100:6.2f} %")
         print(f"Avg Latenz:  {np.mean(latencies):6.2f} ms")
         print(f"P95 Latenz:  {np.percentile(latencies, 95):6.2f} ms")
-    else:
-        print("Keine erfolgreichen Queries.")
-    print("=" * 60)
+        print("=" * 60)
  
  
 if __name__ == "__main__":
