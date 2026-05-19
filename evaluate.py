@@ -3,50 +3,63 @@ import p2p_pb2
 import p2p_pb2_grpc
 import numpy as np
 import time
+import random
+from config import NUM_NODES
+
+NUM_QUERIES = 100
+K = 3
+TTL = 4
+ALL_NODES = [f"127.0.0.1:{5001 + i}" for i in range(NUM_NODES)]
+
 
 def test_search():
-    print("Lade eine Query...")
     queries = np.load("queries.npy")
-    query_vec = queries[0] 
-    query_bytes = np.array(query_vec, dtype=np.float32).tobytes()
+    dataset = np.load("dataset.npy")
+    full_gt = np.load("ground_truth.npy")
 
-    target = "127.0.0.1:5001"
-    print(f"Verbinde mit {target}...\n")
+    random.seed(42)
+    latencies = []
+    total_recall = 0.0
 
-    channel = grpc.insecure_channel(target)
-    stub = p2p_pb2_grpc.VectorStoreStub(channel)
+    for qi in range(NUM_QUERIES):
+        query_vec = queries[qi]
+        gt_indices = full_gt[qi][:K]
+        gt_vecs = dataset[gt_indices]
+        diffs = gt_vecs - query_vec
+        gt_dists = np.sum(diffs ** 2, axis=1)
+        gt_max = float(np.max(gt_dists))
 
-    print("--- Isoliert: Lokale Suche (TTL=0) ---")
-    req_local = p2p_pb2.SearchRequest(
-        query=p2p_pb2.Vector(values=query_bytes),
-        k=5,
-        ttl=0,
-        visited_peers=[],
-        sender_ip="127.0.0.1",
-        sender_port=9999
-    )
-    start = time.time()
-    res_local = stub.SearchSimilar(req_local)
-    print(f"Dauer: {(time.time() - start)*1000:.2f} ms")
-    print("Beste Ergebnisse (Peer -> Distanz):")
-    for p, d in zip(res_local.nearest_peers, res_local.distances):
-        print(f"  {p.ip}:{p.port} -> Distanz: {d:.2f}")
+        entry_node = random.choice(ALL_NODES)
+        channel = grpc.insecure_channel(entry_node)
+        stub = p2p_pb2_grpc.VectorStoreStub(channel)
 
-    print("\n--- Netzwerk: Verteilte Suche (TTL=3) ---")
-    req_dist = p2p_pb2.SearchRequest(
-        query=p2p_pb2.Vector(values=query_bytes),
-        k=5,
-        ttl=3,
-        visited_peers=[],
-        sender_ip="127.0.0.1",
-        sender_port=9999
-    )
-    start = time.time()
-    res_dist = stub.SearchSimilar(req_dist)
-    print(f"Dauer: {(time.time() - start)*1000:.2f} ms")
-    print("Beste Ergebnisse (Peer -> Distanz):")
-    for p, d in zip(res_dist.nearest_peers, res_dist.distances):
-        print(f"  {p.ip}:{p.port} -> Distanz: {d:.2f}")
+        query_bytes = np.array(query_vec, dtype=np.float32).tobytes()
+        req = p2p_pb2.SearchRequest(
+            query=p2p_pb2.Vector(values=query_bytes),
+            k=K,
+            ttl=TTL,
+            visited_peers=[],
+            sender_ip="127.0.0.1",
+            sender_port=9999
+        )
+
+        t0 = time.time()
+        res = stub.SearchSimilar(req)
+        latency_ms = (time.time() - t0) * 1000
+        latencies.append(latency_ms)
+
+        matches = sum(1 for d in res.distances if d <= gt_max + 1e-5)
+        recall = min(matches, K) / K
+        total_recall += recall
+
+        channel.close()
+
+    avg_recall = (total_recall / NUM_QUERIES) * 100
+    avg_latency = np.mean(latencies)
+    p95_latency = np.percentile(latencies, 95)
+
+    print(f"Recall: {avg_recall:.2f} %, Avg Latenz: {avg_latency:.2f} ms, P95 Latenz: {p95_latency:.2f} ms")
+
 
 if __name__ == '__main__':
     test_search()
