@@ -10,7 +10,7 @@ class LocalGraphState:
     def __init__(self, dimension=128, M=32):
         self.dimension = dimension
         self.local_index = faiss.IndexHNSWFlat(dimension, M)
-        self.neighbors = []
+        self.neighbors = {}  
 
     def insert_local(self, vector):
         vec_np = np.array([vector], dtype=np.float32)
@@ -30,10 +30,11 @@ class LocalGraphState:
         results.sort(key=lambda x: x[2])
         return results[:k]
     
-    def add_neighbor(self, target):
+    def add_neighbor_edge(self, ip, port, vector):
+        target = f"{ip}:{port}"
         if target not in self.neighbors:
-            self.neighbors.append(target)
-
+            self.neighbors[target] = []
+        self.neighbors[target].append(vector)
 
 class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
     def __init__(self, port, local_graph, router):
@@ -46,8 +47,8 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
         visited = list(request.visited_peers)
         
         if request.sender_port > 0:
+            self.local_graph.add_neighbor_edge(request.sender_ip, request.sender_port, query_vec)
             sender_target = f"{request.sender_ip}:{request.sender_port}"
-            self.local_graph.add_neighbor(sender_target)
             print(f"[Node {self.port} TTL={request.ttl}] Anfrage empfangen von {sender_target}")
         
         local_res = self.local_graph.search_local(query_vec, request.k, "127.0.0.1", self.port)
@@ -93,7 +94,7 @@ async def serve(port, bootstrap_port=None, node_id=0):
         print(f"[Node {port}] Fehler: dataset.npy nicht gefunden!")
 
     if bootstrap_port and bootstrap_port != "None":
-        local_graph.neighbors.append(f"127.0.0.1:{bootstrap_port}")
+        local_graph.add_neighbor_edge("127.0.0.1", int(bootstrap_port), [0.0] * 128)
 
     from protocol import DistributedRouter
     router = DistributedRouter("127.0.0.1", port)
@@ -105,7 +106,7 @@ async def serve(port, bootstrap_port=None, node_id=0):
     )
     server.add_insecure_port(f'[::]:{port}')
     
-    print(f"[Node {port}] Online. Bekannte Nachbarn: {local_graph.neighbors}")
+    print(f"[Node {port}] Online.")
     
     await server.start()
     await server.wait_for_termination()
