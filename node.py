@@ -4,7 +4,10 @@ import p2p_pb2
 import p2p_pb2_grpc
 import numpy as np
 import faiss
+import random
 import sys
+
+MAX_NEIGHBORS = 3
 
 class LocalGraphState:
     def __init__(self, dimension=128, M=32):
@@ -33,6 +36,8 @@ class LocalGraphState:
     def add_neighbor_edge(self, ip, port, vector):
         target = f"{ip}:{port}"
         if target not in self.neighbors:
+            if len(self.neighbors) >= MAX_NEIGHBORS:
+                del self.neighbors[random.choice(list(self.neighbors.keys()))]
             self.neighbors[target] = []
         self.neighbors[target].append(vector)
 

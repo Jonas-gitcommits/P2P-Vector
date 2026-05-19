@@ -53,6 +53,9 @@ def run_evaluation():
     print("Berechne Ground-Truth-Distanzen...")
     gt_max_dists = build_ground_truth_max_dists(dataset, queries, full_gt)
     print(f"  Fertig: {len(gt_max_dists)} Distanzen.\n")
+
+    print("Warte 5s für Gossip-Konvergenz...")
+    time.sleep(5)
  
     random.seed(42)
     entry_nodes = [random.choice(ALL_NODES) for _ in queries]
