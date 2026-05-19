@@ -26,7 +26,7 @@ def build_ground_truth_max_dists(dataset, queries, full_gt):
         if len(gt_indices_in_subset) >= K:
             top_k_vecs = dataset[gt_indices_in_subset[:K]]
             
-            dists = np.linalg.norm(top_k_vecs - q, axis=1)
+            dists = np.linalg.norm(top_k_vecs - q, axis=1) ** 2
             gt_max_dists.append(float(dists.max()))
         else:
            

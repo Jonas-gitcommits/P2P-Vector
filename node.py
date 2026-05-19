@@ -46,7 +46,7 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
         query_vec = np.frombuffer(request.query.values, dtype=np.float32).tolist()
         visited = list(request.visited_peers)
         
-        if request.sender_port > 0:
+        if request.sender_port > 0 and request.sender_port != 9999:
             self.local_graph.add_neighbor_edge(request.sender_ip, request.sender_port, query_vec)
             sender_target = f"{request.sender_ip}:{request.sender_port}"
             print(f"[Node {self.port} TTL={request.ttl}] Anfrage empfangen von {sender_target}")
