@@ -3,46 +3,114 @@ import p2p_pb2
 import p2p_pb2_grpc
 import numpy as np
 import time
+import random
+import faiss
+from config import NUM_NODES, SUBSET_SIZE
 
-def test_search():
-    print("Lade eine Query...")
-    queries = np.load("queries.npy")
-    query_vec = queries[0] 
-    query_bytes = np.array(query_vec, dtype=np.float32).tobytes()
+NUM_QUERIES = 100
+NUM_RUNS = 3
+DIMENSION = 128
+K = 3
+TTL = 4
+START_PORT = 5000
+ALL_NODES = [f"127.0.0.1:{START_PORT + i}" for i in range(NUM_NODES)]
+ 
+def build_ground_truth_max_dists(dataset, queries, full_gt):
+    """Berechnet für jede Query die maximale Distanz zu den Top-K Ground-Truth-Vektoren im Subset."""
+    central_index = None
+    gt_max_dists = []
+ 
+    for qi, q in enumerate(queries):
 
-    target = "127.0.0.1:5001"
-    print(f"Verbinde mit {target}...\n")
+        gt_indices_in_subset = [idx for idx in full_gt[qi] if idx < SUBSET_SIZE]
+ 
+        if len(gt_indices_in_subset) >= K:
+            top_k_vecs = dataset[gt_indices_in_subset[:K]]
+            
+            dists = np.linalg.norm(top_k_vecs - q, axis=1) ** 2
+            gt_max_dists.append(float(dists.max()))
+        else:
+           
+            if central_index is None:
+                central_index = faiss.IndexFlatL2(DIMENSION)
+                central_index.add(dataset)
+            d, _ = central_index.search(
+                np.array([q], dtype=np.float32), K
+            )
+            gt_max_dists.append(float(d[0][-1]))
+ 
+    return gt_max_dists
+ 
+ 
+def run_evaluation():
+    print("Lade Datensatz...")
+    dataset = np.load("dataset.npy").astype(np.float32)
+    all_queries = np.load("queries.npy").astype(np.float32)
+    full_gt = np.load("ground_truth.npy")
+    queries = all_queries[:NUM_QUERIES]
+    print(f"  dataset: {dataset.shape}, queries: {queries.shape}")
+    print(f"  SUBSET_SIZE = {SUBSET_SIZE} (NUM_NODES={NUM_NODES})")
+ 
+    print("Berechne Ground-Truth-Distanzen...")
+    gt_max_dists = build_ground_truth_max_dists(dataset, queries, full_gt)
+    print(f"  Fertig: {len(gt_max_dists)} Distanzen.\n")
 
-    channel = grpc.insecure_channel(target)
-    stub = p2p_pb2_grpc.VectorStoreStub(channel)
+    print("Warte 5s für Gossip-Konvergenz...")
+    time.sleep(5)
 
-    print("--- Isoliert: Lokale Suche (TTL=0) ---")
-    req_local = p2p_pb2.SearchRequest(
-        query=p2p_pb2.Vector(values=query_bytes),
-        k=5,
-        ttl=0,
-        visited_peers=[]
-    )
-    start = time.time()
-    res_local = stub.SearchSimilar(req_local)
-    print(f"Dauer: {(time.time() - start)*1000:.2f} ms")
-    print("Beste Ergebnisse (Peer -> Distanz):")
-    for p, d in zip(res_local.nearest_peers, res_local.distances):
-        print(f"  {p.ip}:{p.port} -> Distanz: {d:.2f}")
+    channels = {n: grpc.insecure_channel(n) for n in ALL_NODES}
+    stubs = {n: p2p_pb2_grpc.VectorStoreStub(channels[n]) for n in ALL_NODES}
 
-    print("\n--- Netzwerk: Verteilte Suche (TTL=2) ---")
-    req_dist = p2p_pb2.SearchRequest(
-        query=p2p_pb2.Vector(values=query_bytes),
-        k=5,
-        ttl=2,
-        visited_peers=[]
-    )
-    start = time.time()
-    res_dist = stub.SearchSimilar(req_dist)
-    print(f"Dauer: {(time.time() - start)*1000:.2f} ms")
-    print("Beste Ergebnisse (Peer -> Distanz):")
-    for p, d in zip(res_dist.nearest_peers, res_dist.distances):
-        print(f"  {p.ip}:{p.port} -> Distanz: {d:.2f}")
+    run_recalls = []
+    run_latencies = []
 
-if __name__ == '__main__':
-    test_search()
+    for run_id in range(NUM_RUNS):
+        random.seed(42 + run_id)
+        entry_nodes = [random.choice(ALL_NODES) for _ in queries]
+
+        latencies = []
+        recalls = []
+
+        print(f"Run {run_id + 1}/{NUM_RUNS} ({NUM_QUERIES} Queries, TTL={TTL}, K={K})...")
+        for i, query_vector in enumerate(queries):
+            entry_node = entry_nodes[i]
+            gt_max = gt_max_dists[i]
+
+            query_bytes = np.array(query_vector, dtype=np.float32).tobytes()
+            vec = p2p_pb2.Vector(values=query_bytes)
+            request = p2p_pb2.SearchRequest(
+                query=vec,
+                k=K,
+                ttl=TTL,
+                visited_peers=[],
+                sender_ip="127.0.0.1",
+                sender_port=9999,
+            )
+
+            try:
+                t0 = time.time()
+                response = stubs[entry_node].SearchSimilar(request, timeout=5.0)
+                latencies.append((time.time() - t0) * 1000)
+                matches = sum(1 for d in response.distances if d <= gt_max + 1e-5)
+                recalls.append(min(matches, K) / K)
+            except grpc.RpcError:
+                pass
+
+        if recalls:
+            run_recalls.append(np.mean(recalls) * 100)
+            run_latencies.append(np.mean(latencies))
+
+    for ch in channels.values():
+        ch.close()
+
+    if run_recalls:
+        print("\n" + "=" * 60)
+        print(f"Recall:      {np.mean(recalls) * 100:6.2f} %")
+        print(f"Avg Latenz:  {np.mean(latencies):6.2f} ms")
+        print(f"P95 Latenz:  {np.percentile(latencies, 95):6.2f} ms")
+        print("=" * 60)
+ 
+ 
+if __name__ == "__main__":
+    run_evaluation()
+ 

@@ -4,13 +4,16 @@ import p2p_pb2
 import p2p_pb2_grpc
 import numpy as np
 import faiss
+import random
 import sys
+
+MAX_NEIGHBORS = 8
 
 class LocalGraphState:
     def __init__(self, dimension=128, M=32):
         self.dimension = dimension
         self.local_index = faiss.IndexHNSWFlat(dimension, M)
-        self.neighbors = []
+        self.neighbors = {}  
 
     def insert_local(self, vector):
         vec_np = np.array([vector], dtype=np.float32)
@@ -29,6 +32,32 @@ class LocalGraphState:
 
         results.sort(key=lambda x: x[2])
         return results[:k]
+    
+    def add_neighbor_edge(self, ip, port, vector):
+        target = f"{ip}:{port}"
+        if target not in self.neighbors:
+            self.neighbors[target] = []
+        self.neighbors[target].append(vector)
+ 
+        if len(self.neighbors) > MAX_NEIGHBORS:
+            neighbor_distances = []
+            for n_target, n_vectors in self.neighbors.items():
+                vec_np = np.array([n_vectors[-1]], dtype=np.float32)
+                if self.local_index.ntotal > 0:
+                    dists, _ = self.local_index.search(vec_np, 1)
+                    dist = float(dists[0][0])
+                else:
+                    dist = float("inf")
+                neighbor_distances.append((dist, n_target, n_vectors))
+ 
+            neighbor_distances.sort(key=lambda x: x[0])
+            best_neighbors = neighbor_distances[:6]
+            remaining = neighbor_distances[6:]
+            random_picks = random.sample(remaining, 2)
+ 
+            self.neighbors = {}
+            for _, t, v_list in best_neighbors + random_picks:
+                self.neighbors[t] = v_list
 
 
 class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
@@ -41,6 +70,9 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
         query_vec = np.frombuffer(request.query.values, dtype=np.float32).tolist()
         visited = list(request.visited_peers)
         
+        if request.sender_port > 0 and request.sender_port != 9999:
+            self.local_graph.add_neighbor_edge(request.sender_ip, request.sender_port, query_vec)
+           
         local_res = self.local_graph.search_local(query_vec, request.k, "127.0.0.1", self.port)
         combined_res = list(local_res)
 
@@ -84,7 +116,7 @@ async def serve(port, bootstrap_port=None, node_id=0):
         print(f"[Node {port}] Fehler: dataset.npy nicht gefunden!")
 
     if bootstrap_port and bootstrap_port != "None":
-        local_graph.neighbors.append(f"127.0.0.1:{bootstrap_port}")
+        local_graph.add_neighbor_edge("127.0.0.1", int(bootstrap_port), [0.0] * 128)
 
     from protocol import DistributedRouter
     router = DistributedRouter("127.0.0.1", port)
@@ -96,7 +128,7 @@ async def serve(port, bootstrap_port=None, node_id=0):
     )
     server.add_insecure_port(f'[::]:{port}')
     
-    print(f"[Node {port}] Online. Bekannte Nachbarn: {local_graph.neighbors}")
+    print(f"[Node {port}] Online.")
     
     await server.start()
     await server.wait_for_termination()

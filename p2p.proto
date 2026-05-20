@@ -20,6 +20,8 @@ message SearchRequest {
   int32 k = 2;
   int32 ttl = 3;                     
   repeated string visited_peers = 4;
+  string sender_ip = 5;
+  int32 sender_port = 6;
 }
 
 message SearchResponse {
