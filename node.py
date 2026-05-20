@@ -36,10 +36,29 @@ class LocalGraphState:
     def add_neighbor_edge(self, ip, port, vector):
         target = f"{ip}:{port}"
         if target not in self.neighbors:
-            if len(self.neighbors) >= MAX_NEIGHBORS:
-                del self.neighbors[random.choice(list(self.neighbors.keys()))]
             self.neighbors[target] = []
         self.neighbors[target].append(vector)
+ 
+        if len(self.neighbors) > MAX_NEIGHBORS:
+            neighbor_distances = []
+            for n_target, n_vectors in self.neighbors.items():
+                vec_np = np.array([n_vectors[-1]], dtype=np.float32)
+                if self.local_index.ntotal > 0:
+                    dists, _ = self.local_index.search(vec_np, 1)
+                    dist = float(dists[0][0])
+                else:
+                    dist = float("inf")
+                neighbor_distances.append((dist, n_target, n_vectors))
+ 
+            neighbor_distances.sort(key=lambda x: x[0])
+            best_neighbors = neighbor_distances[:6]
+            remaining = neighbor_distances[6:]
+            random_picks = random.sample(remaining, 2)
+ 
+            self.neighbors = {}
+            for _, t, v_list in best_neighbors + random_picks:
+                self.neighbors[t] = v_list
+
 
 class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
     def __init__(self, port, local_graph, router):
@@ -53,9 +72,7 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
         
         if request.sender_port > 0 and request.sender_port != 9999:
             self.local_graph.add_neighbor_edge(request.sender_ip, request.sender_port, query_vec)
-            sender_target = f"{request.sender_ip}:{request.sender_port}"
-            # print(f"[Node {self.port} TTL={request.ttl}] Anfrage empfangen von {sender_target}")
-        
+           
         local_res = self.local_graph.search_local(query_vec, request.k, "127.0.0.1", self.port)
         combined_res = list(local_res)
 
