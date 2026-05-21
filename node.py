@@ -98,7 +98,7 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
             
         return response
     
-async def Ping(self, request, context):
+    async def Ping(self, request, context):
         return p2p_pb2.PingResponse(
             alive=True, 
             neighbor_count=len(self.local_graph.neighbors)

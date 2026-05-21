@@ -68,8 +68,8 @@ def run_evaluation():
     gt_max_dists = build_ground_truth_max_dists(dataset, queries, full_gt)
     print(f"  Fertig: {len(gt_max_dists)} Distanzen.\n")
 
-    print("Warte 5s für Gossip-Konvergenz...")
-    time.sleep(5)
+    print("Warte 10s für Gossip-Konvergenz...")
+    time.sleep(10)
 
     alive_nodes = get_alive_nodes(ALL_NODES)
     print(f"Erreichbar: {len(alive_nodes)}/{len(ALL_NODES)}")

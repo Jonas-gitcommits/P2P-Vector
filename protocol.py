@@ -81,7 +81,7 @@ class DistributedRouter:
     
     async def health_check_loop(self, local_graph):
         while True:
-            await asyncio.sleep(10)
+            await asyncio.sleep(5)
             dead_targets = []
             
             for target in list(local_graph.neighbors.keys()):
