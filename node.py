@@ -97,6 +97,12 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
             response.distances.append(dist)
             
         return response
+    
+async def Ping(self, request, context):
+        return p2p_pb2.PingResponse(
+            alive=True, 
+            neighbor_count=len(self.local_graph.neighbors)
+        )
 
 async def serve(port, bootstrap_port=None, node_id=0):
     local_graph = LocalGraphState()
@@ -120,6 +126,8 @@ async def serve(port, bootstrap_port=None, node_id=0):
 
     from protocol import DistributedRouter
     router = DistributedRouter("127.0.0.1", port)
+
+    asyncio.create_task(router.health_check_loop(local_graph))
     
     server = grpc.aio.server()
     

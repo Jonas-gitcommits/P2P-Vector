@@ -41,6 +41,19 @@ def build_ground_truth_max_dists(dataset, queries, full_gt):
  
     return gt_max_dists
  
+def get_alive_nodes(nodes):
+    alive = []
+    for n in nodes:
+        try:
+            channel = grpc.insecure_channel(n)
+            stub = p2p_pb2_grpc.VectorStoreStub(channel)
+            stub.Ping(p2p_pb2.PingRequest(), timeout=1.0)
+            alive.append(n)
+        except grpc.RpcError:
+            pass
+        finally:
+            channel.close()
+    return alive
  
 def run_evaluation():
     print("Lade Datensatz...")
@@ -58,15 +71,23 @@ def run_evaluation():
     print("Warte 5s für Gossip-Konvergenz...")
     time.sleep(5)
 
-    channels = {n: grpc.insecure_channel(n) for n in ALL_NODES}
-    stubs = {n: p2p_pb2_grpc.VectorStoreStub(channels[n]) for n in ALL_NODES}
+    alive_nodes = get_alive_nodes(ALL_NODES)
+    print(f"Erreichbar: {len(alive_nodes)}/{len(ALL_NODES)}")
+    
+    if not alive_nodes:
+        print("Keine Knoten erreichbar! Abbruch.")
+        return
+
+    channels = {n: grpc.insecure_channel(n) for n in alive_nodes}
+    stubs = {n: p2p_pb2_grpc.VectorStoreStub(channels[n]) for n in alive_nodes}
 
     run_recalls = []
     run_latencies = []
 
     for run_id in range(NUM_RUNS):
         random.seed(42 + run_id)
-        entry_nodes = [random.choice(ALL_NODES) for _ in queries]
+        
+        entry_nodes = [random.choice(alive_nodes) for _ in queries]
 
         latencies = []
         recalls = []
