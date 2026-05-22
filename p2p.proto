@@ -4,6 +4,7 @@ package p2pvector;
 
 service VectorStore {
   rpc SearchSimilar (SearchRequest) returns (SearchResponse) {}
+  rpc Ping (PingRequest) returns (PingResponse) {}
 }
 
 message Vector {
@@ -27,4 +28,13 @@ message SearchRequest {
 message SearchResponse {
   repeated Peer nearest_peers = 1;
   repeated float distances = 2;
+}
+
+message PingRequest {
+  string sender_ip = 1;
+}
+
+message PingResponse {
+  bool alive = 1;
+  int32 neighbor_count = 2;
 }

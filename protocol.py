@@ -78,3 +78,24 @@ class DistributedRouter:
                 unique_results.append((ip, port, dist))
 
         return unique_results[:k]
+    
+    async def health_check_loop(self, local_graph):
+        while True:
+            await asyncio.sleep(5)
+            dead_targets = []
+            
+            for target in list(local_graph.neighbors.keys()):
+                channel = self._get_channel(target)
+                stub = p2p_pb2_grpc.VectorStoreStub(channel)
+                
+                try:
+                    await stub.Ping(p2p_pb2.PingRequest(), timeout=1.0)
+                except grpc.RpcError:
+                    dead_targets.append(target)
+            
+            for target in dead_targets:
+                if target in local_graph.neighbors:
+                    del local_graph.neighbors[target]
+                if target in self._channel_pool:
+                    await self._channel_pool[target].close()
+                    del self._channel_pool[target]
