@@ -108,7 +108,7 @@ async def serve(port, bootstrap_port=None, node_id=0):
     local_graph = LocalGraphState()
 
     try:
-        from config import VECTORS_PER_NODE
+        from config import VECTORS_PER_NODE, NUM_NODES, REPLICATION
         dataset = np.load("dataset.npy")
         chunk_size = VECTORS_PER_NODE
         
@@ -118,6 +118,14 @@ async def serve(port, bootstrap_port=None, node_id=0):
             local_graph.insert_local(vec.tolist())
 
         print(f"[Node {port}] ID {node_id}: {len(my_chunk)} Vektoren geladen.")
+
+        if REPLICATION:
+            replica_id = (node_id + 1) % NUM_NODES
+            replica_start = replica_id * chunk_size
+            replica_chunk = dataset[replica_start:replica_start + chunk_size]
+            for vec in replica_chunk:
+                local_graph.insert_local(vec.tolist())
+            print(f"[Node {port}] Replikat von ID {replica_id}: {len(replica_chunk)} Vektoren geladen.")
     except FileNotFoundError:
         print(f"[Node {port}] Fehler: dataset.npy nicht gefunden!")
 
