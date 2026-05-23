@@ -83,6 +83,7 @@ def run_evaluation():
 
     run_recalls = []
     run_latencies = []
+    all_latencies = []
 
     for run_id in range(NUM_RUNS):
         random.seed(42 + run_id)
@@ -120,15 +121,17 @@ def run_evaluation():
         if recalls:
             run_recalls.append(np.mean(recalls) * 100)
             run_latencies.append(np.mean(latencies))
+            all_latencies.extend(latencies)
 
     for ch in channels.values():
         ch.close()
 
     if run_recalls:
         print("\n" + "=" * 60)
-        print(f"Recall:      {np.mean(recalls) * 100:6.2f} %")
-        print(f"Avg Latenz:  {np.mean(latencies):6.2f} ms")
-        print(f"P95 Latenz:  {np.percentile(latencies, 95):6.2f} ms")
+        print(f"Recall:      {np.mean(run_recalls):6.2f} %  "
+              f"(Min: {np.min(run_recalls):.2f} %, Max: {np.max(run_recalls):.2f} %)")
+        print(f"Avg Latenz:  {np.mean(all_latencies):6.2f} ms")
+        print(f"P95 Latenz:  {np.percentile(all_latencies, 95):6.2f} ms")
         print("=" * 60)
  
  

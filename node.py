@@ -26,9 +26,10 @@ class LocalGraphState:
 
         if self.local_index.ntotal > 0:
             search_k = min(k, self.local_index.ntotal)
-            dist, _ = self.local_index.search(query_np, search_k)
-            for d in dist[0]:
-                results.append((my_ip, my_port, float(d)))
+            dist, idx = self.local_index.search(query_np, search_k)
+            for d, i in zip(dist[0], idx[0]):
+                if i >= 0 and np.isfinite(d):
+                    results.append((my_ip, my_port, float(d)))
 
         results.sort(key=lambda x: x[2])
         return results[:k]
@@ -108,16 +109,30 @@ async def serve(port, bootstrap_port=None, node_id=0):
     local_graph = LocalGraphState()
 
     try:
-        from config import VECTORS_PER_NODE
+        from config import VECTORS_PER_NODE, NUM_NODES, REPLICATION
         dataset = np.load("dataset.npy")
         chunk_size = VECTORS_PER_NODE
         
         start_idx = node_id * chunk_size
+        if start_idx + chunk_size > len(dataset):
+            raise RuntimeError(
+                f"dataset.npy zu klein!"
+                f"Bitte `python generate_data.py` erneut ausführen."
+                
+            )
         my_chunk = dataset[start_idx:start_idx + chunk_size]
         for vec in my_chunk:
             local_graph.insert_local(vec.tolist())
 
         print(f"[Node {port}] ID {node_id}: {len(my_chunk)} Vektoren geladen.")
+
+        if REPLICATION:
+            replica_id = (node_id + 1) % NUM_NODES
+            replica_start = replica_id * chunk_size
+            replica_chunk = dataset[replica_start:replica_start + chunk_size]
+            for vec in replica_chunk:
+                local_graph.insert_local(vec.tolist())
+            print(f"[Node {port}] Replikat von ID {replica_id}: {len(replica_chunk)} Vektoren geladen.")
     except FileNotFoundError:
         print(f"[Node {port}] Fehler: dataset.npy nicht gefunden!")
 
@@ -135,8 +150,6 @@ async def serve(port, bootstrap_port=None, node_id=0):
         VectorStoreServicer(port, local_graph, router), server
     )
     server.add_insecure_port(f'[::]:{port}')
-    
-    print(f"[Node {port}] Online.")
     
     await server.start()
     await server.wait_for_termination()
