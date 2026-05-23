@@ -113,6 +113,12 @@ async def serve(port, bootstrap_port=None, node_id=0):
         chunk_size = VECTORS_PER_NODE
         
         start_idx = node_id * chunk_size
+        if start_idx + chunk_size > len(dataset):
+            raise RuntimeError(
+                f"dataset.npy zu klein!"
+                f"Bitte `python generate_data.py` erneut ausführen."
+                
+            )
         my_chunk = dataset[start_idx:start_idx + chunk_size]
         for vec in my_chunk:
             local_graph.insert_local(vec.tolist())
@@ -143,8 +149,6 @@ async def serve(port, bootstrap_port=None, node_id=0):
         VectorStoreServicer(port, local_graph, router), server
     )
     server.add_insecure_port(f'[::]:{port}')
-    
-    print(f"[Node {port}] Online.")
     
     await server.start()
     await server.wait_for_termination()
