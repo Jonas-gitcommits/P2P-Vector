@@ -26,9 +26,10 @@ class LocalGraphState:
 
         if self.local_index.ntotal > 0:
             search_k = min(k, self.local_index.ntotal)
-            dist, _ = self.local_index.search(query_np, search_k)
-            for d in dist[0]:
-                results.append((my_ip, my_port, float(d)))
+            dist, idx = self.local_index.search(query_np, search_k)
+            for d, i in zip(dist[0], idx[0]):
+                if i >= 0 and np.isfinite(d):
+                    results.append((my_ip, my_port, float(d)))
 
         results.sort(key=lambda x: x[2])
         return results[:k]
