@@ -93,7 +93,8 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
         query_vec = np.frombuffer(request.query.values, dtype=np.float32).tolist()
         visited = list(request.visited_peers)
         
-        if request.sender_port > 0 and request.sender_port != 9999:
+        if (request.sender_port > 0 and request.sender_port != 9999
+                and not (request.sender_ip == "127.0.0.1" and request.sender_port == self.port)):
             self.local_graph.add_neighbor_edge(request.sender_ip, request.sender_port, query_vec)
            
         local_res = self.local_graph.search_local(query_vec, request.k, "127.0.0.1", self.port)

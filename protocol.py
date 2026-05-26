@@ -24,11 +24,11 @@ class DistributedRouter:
         vec = p2p_pb2.Vector(values=query_bytes)
         
         request = p2p_pb2.SearchRequest(
-            query=vec, 
-            k=k, 
-            ttl=ttl, 
-            visited_peers=visited_peers,
-            sender_ip=self.my_ip,        
+            query=vec,
+            k=k,
+            ttl=ttl,
+            visited_peers=list(visited_peers),
+            sender_ip=self.my_ip,
             sender_port=self.my_port
         )
         
@@ -91,8 +91,9 @@ class DistributedRouter:
                     target, my_vector, k=2, ttl=1, visited_peers=[my_target]
                 )
                 for ip, port, _ in results:
-                    if f"{ip}:{port}" != my_target:
-                        local_graph.add_neighbor_edge(ip, port, my_vector)
+                    if ip == self.my_ip and port == self.my_port:
+                        continue
+                    local_graph.add_neighbor_edge(ip, port, my_vector)
             except Exception:
                 pass
     
