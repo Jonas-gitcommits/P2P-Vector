@@ -34,6 +34,28 @@ class LocalGraphState:
         results.sort(key=lambda x: x[2])
         return results[:k]
     
+    def get_my_latest_vector(self):
+        if self.local_index.ntotal == 0:
+            return [0.0] * self.dimension
+        idx = random.randint(0, self.local_index.ntotal - 1)
+        return self.local_index.reconstruct(idx).tolist()
+
+    def evaluate_next_hop(self, query_vector, visited_peers, best_dist_so_far=None):
+        query_np = np.array(query_vector, dtype=np.float32)
+        candidates = []
+        for target, vectors in self.neighbors.items():
+            if target in visited_peers:
+                continue
+            vec_np = np.array(vectors[-1], dtype=np.float32)
+            dist = float(np.sum((query_np - vec_np) ** 2))
+            candidates.append((dist, target))
+
+        if not candidates:
+            return {"action": "stop", "targets": []}
+
+        candidates.sort(key=lambda x: x[0])
+        return {"action": "hop", "targets": [candidates[0][1]]}
+
     def add_neighbor_edge(self, ip, port, vector):
         target = f"{ip}:{port}"
         if target not in self.neighbors:
@@ -79,7 +101,7 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
 
         if request.ttl > 0:
             remote_res = await self.router.distributed_search(
-                self.local_graph.neighbors,
+                self.local_graph,
                 query_vec,
                 request.k,
                 request.ttl,
@@ -143,6 +165,7 @@ async def serve(port, bootstrap_port=None, node_id=0):
     router = DistributedRouter("127.0.0.1", port)
 
     asyncio.create_task(router.health_check_loop(local_graph))
+    asyncio.create_task(router.start_gossip_loop(local_graph))
     
     server = grpc.aio.server()
     

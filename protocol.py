@@ -3,6 +3,7 @@ import numpy as np
 import p2p_pb2
 import p2p_pb2_grpc
 import asyncio
+import random
 
 class DistributedRouter:
     def __init__(self, my_ip, my_port):
@@ -37,30 +38,26 @@ class DistributedRouter:
         except grpc.RpcError:
             return [] 
         
-    async def distributed_search(self, neighbors, query_vector, k, ttl, visited_peers):
+    async def distributed_search(self, local_graph, query_vector, k, ttl, visited_peers):
         my_target = f"{self.my_ip}:{self.my_port}"
-        
+
         if visited_peers is None:
             visited_peers = []
-            
+
         if my_target not in visited_peers:
             visited_peers.append(my_target)
 
         if ttl <= 0:
             return []
 
-        tasks = []
-        for target in neighbors:
-            if target in visited_peers:
-                continue 
-            
-            task = self.ask_neighbor_for_vectors(
-                target, query_vector, k, ttl - 1, list(visited_peers)
-            )
-            tasks.append(task)
-
-        if not tasks:
+        decision = local_graph.evaluate_next_hop(query_vector, visited_peers)
+        if decision["action"] == "stop" or not decision["targets"]:
             return []
+
+        tasks = [
+            self.ask_neighbor_for_vectors(target, query_vector, k, ttl - 1, list(visited_peers))
+            for target in decision["targets"]
+        ]
 
         results = await asyncio.gather(*tasks)
 
@@ -78,6 +75,26 @@ class DistributedRouter:
                 unique_results.append((ip, port, dist))
 
         return unique_results[:k]
+
+    async def start_gossip_loop(self, local_graph):
+        while True:
+            await asyncio.sleep(5)
+            if not local_graph.neighbors:
+                continue
+
+            target = random.choice(list(local_graph.neighbors.keys()))
+            my_vector = local_graph.get_my_latest_vector()
+            my_target = f"{self.my_ip}:{self.my_port}"
+
+            try:
+                results = await self.ask_neighbor_for_vectors(
+                    target, my_vector, k=2, ttl=1, visited_peers=[my_target]
+                )
+                for ip, port, _ in results:
+                    if f"{ip}:{port}" != my_target:
+                        local_graph.add_neighbor_edge(ip, port, my_vector)
+            except Exception:
+                pass
     
     async def health_check_loop(self, local_graph):
         while True:
