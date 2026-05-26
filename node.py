@@ -42,19 +42,20 @@ class LocalGraphState:
 
     def evaluate_next_hop(self, query_vector, visited_peers, best_dist_so_far=None):
         query_np = np.array(query_vector, dtype=np.float32)
-        candidates = []
+        valid_neighbors = []
         for target, vectors in self.neighbors.items():
             if target in visited_peers:
                 continue
             vec_np = np.array(vectors[-1], dtype=np.float32)
             dist = float(np.sum((query_np - vec_np) ** 2))
-            candidates.append((dist, target))
+            valid_neighbors.append((target, dist))
 
-        if not candidates:
+        if not valid_neighbors:
             return {"action": "stop", "targets": []}
 
-        candidates.sort(key=lambda x: x[0])
-        return {"action": "hop", "targets": [candidates[0][1]]}
+        valid_neighbors.sort(key=lambda x: x[1])
+        best_targets = [n[0] for n in valid_neighbors[:2]]
+        return {"action": "hop", "targets": best_targets}
 
     def add_neighbor_edge(self, ip, port, vector):
         target = f"{ip}:{port}"
