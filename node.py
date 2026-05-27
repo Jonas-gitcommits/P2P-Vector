@@ -98,9 +98,11 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
                 and not (request.sender_ip == "127.0.0.1" and request.sender_port == self.port)):
             self.local_graph.add_neighbor_edge(request.sender_ip, request.sender_port, query_vec)
            
+        is_entry = (request.sender_port == 9999)
         fanout_k = request.fanout_k if request.fanout_k > 0 else max(request.k * 4, 20)
+        local_budget = max(fanout_k, request.k)
 
-        local_res = self.local_graph.search_local(query_vec, request.k, "127.0.0.1", self.port)
+        local_res = self.local_graph.search_local(query_vec, local_budget, "127.0.0.1", self.port)
         combined_res = list(local_res)
 
         best_dist = float(local_res[-1][2]) if local_res else request.best_dist_so_far
@@ -118,10 +120,10 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
             combined_res.extend(remote_res)
 
         combined_res.sort(key=lambda x: x[2])
-        final_best_k = combined_res[:request.k]
+        final = combined_res[:request.k] if is_entry else combined_res[:max(fanout_k, request.k)]
 
         response = p2p_pb2.SearchResponse()
-        for ip, port, dist in final_best_k:
+        for ip, port, dist in final:
             p = response.nearest_peers.add()
             p.ip = ip
             p.port = port

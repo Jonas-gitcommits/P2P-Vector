@@ -129,7 +129,7 @@ def run_evaluation():
                         t0 = time.time()
                         response = stubs[entry_node].SearchSimilar(request, timeout=10.0)
                         latencies.append((time.time() - t0) * 1000)
-                        matches = sum(1 for d in response.distances if d <= gt_max + 1e-5)
+                        matches = sum(1 for d in response.distances[:K] if d <= gt_max + 1e-5)
                         recalls.append(min(matches, K) / K)
                     except grpc.RpcError:
                         pass

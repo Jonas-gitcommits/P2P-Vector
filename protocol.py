@@ -88,7 +88,7 @@ class DistributedRouter:
                 seen.add(key)
                 unique_results.append((ip, port, dist))
 
-        return unique_results[:k]
+        return unique_results[:max(fanout_k, k)]
 
     async def start_gossip_loop(self, local_graph):
         while True:
