@@ -16,29 +16,33 @@ class DistributedRouter:
             self._channel_pool[target] = grpc.aio.insecure_channel(target)
         return self._channel_pool[target]
 
-    async def ask_neighbor_for_vectors(self, target, query_vector, k, ttl, visited_peers):
+    async def ask_neighbor_for_vectors(self, target, query_vector, k, ttl, visited_peers,
+                                       best_dist_so_far=0.0, fanout_k=0):
         channel = self._get_channel(target)
         stub = p2p_pb2_grpc.VectorStoreStub(channel)
-        
+
         query_bytes = np.array(query_vector, dtype=np.float32).tobytes()
         vec = p2p_pb2.Vector(values=query_bytes)
-        
+
         request = p2p_pb2.SearchRequest(
             query=vec,
             k=k,
             ttl=ttl,
             visited_peers=list(visited_peers),
             sender_ip=self.my_ip,
-            sender_port=self.my_port
+            sender_port=self.my_port,
+            best_dist_so_far=best_dist_so_far,
+            fanout_k=fanout_k,
         )
-        
+
         try:
             response = await stub.SearchSimilar(request, timeout=1.5)
             return [(p.ip, p.port, d) for p, d in zip(response.nearest_peers, response.distances)]
         except grpc.RpcError:
-            return [] 
+            return []
         
-    async def distributed_search(self, local_graph, query_vector, k, ttl, visited_peers):
+    async def distributed_search(self, local_graph, query_vector, k, ttl, visited_peers,
+                                 best_dist_so_far=0.0, fanout_k=0):
         my_target = f"{self.my_ip}:{self.my_port}"
 
         if visited_peers is None:
@@ -50,13 +54,23 @@ class DistributedRouter:
         if ttl <= 0:
             return []
 
+        from config import EARLY_STOP_ENABLED, EARLY_STOP_THRESHOLD
+        if EARLY_STOP_ENABLED and best_dist_so_far > 0 and best_dist_so_far <= EARLY_STOP_THRESHOLD:
+            return []
+
         decision = local_graph.evaluate_next_hop(query_vector, visited_peers)
         if decision["action"] == "stop" or not decision["targets"]:
             return []
 
+        effective_fanout = fanout_k if fanout_k > 0 else len(decision["targets"])
+        targets = decision["targets"][:effective_fanout]
+
         tasks = [
-            self.ask_neighbor_for_vectors(target, query_vector, k, ttl - 1, list(visited_peers))
-            for target in decision["targets"]
+            self.ask_neighbor_for_vectors(
+                target, query_vector, k, ttl - 1, list(visited_peers),
+                best_dist_so_far=best_dist_so_far, fanout_k=fanout_k
+            )
+            for target in targets
         ]
 
         results = await asyncio.gather(*tasks)

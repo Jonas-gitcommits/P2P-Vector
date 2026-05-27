@@ -19,10 +19,12 @@ message Peer {
 message SearchRequest {
   Vector query = 1;
   int32 k = 2;
-  int32 ttl = 3;                     
+  int32 ttl = 3;
   repeated string visited_peers = 4;
   string sender_ip = 5;
   int32 sender_port = 6;
+  float best_dist_so_far = 7;
+  int32 fanout_k = 8;
 }
 
 message SearchResponse {
