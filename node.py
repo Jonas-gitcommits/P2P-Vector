@@ -120,7 +120,17 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
             combined_res.extend(remote_res)
 
         combined_res.sort(key=lambda x: x[2])
-        final = combined_res[:request.k] if is_entry else combined_res[:max(fanout_k, request.k)]
+
+        seen = set()
+        deduped = []
+        for ip, port, dist in combined_res:
+            dkey = round(dist, 5)
+            if dkey in seen:
+                continue
+            seen.add(dkey)
+            deduped.append((ip, port, dist))
+
+        final = deduped[:request.k] if is_entry else deduped[:max(fanout_k, request.k)]
 
         response = p2p_pb2.SearchResponse()
         for ip, port, dist in final:

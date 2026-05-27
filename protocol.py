@@ -83,7 +83,7 @@ class DistributedRouter:
         unique_results = []
         seen = set()
         for ip, port, dist in combined_results:
-            key = (ip, port, round(dist, 5))
+            key = round(dist, 5)
             if key not in seen:
                 seen.add(key)
                 unique_results.append((ip, port, dist))
