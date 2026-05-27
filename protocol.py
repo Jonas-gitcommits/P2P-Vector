@@ -68,7 +68,7 @@ class DistributedRouter:
         tasks = [
             self.ask_neighbor_for_vectors(
                 target, query_vector, k, ttl - 1, list(visited_peers),
-                best_dist_so_far=best_dist_so_far, fanout_k=fanout_k
+                best_dist_so_far=best_dist_so_far, fanout_k=effective_fanout
             )
             for target in targets
         ]
