@@ -110,7 +110,8 @@ def run_evaluation():
     variants = resolve_variants(EVAL_VARIANT)
     fanout_k = max(K * 4, 20)
 
-    results = {ttl: {v: [] for v in variants} for ttl in TTL_VALUES}
+    results = {ttl: {v: {"recalls": [], "latencies": []} for v in variants}
+               for ttl in TTL_VALUES}
 
     for run_id in range(NUM_RUNS):
         random.seed(42 + run_id)
@@ -120,8 +121,6 @@ def run_evaluation():
             for variant in variants:
                 print(f"Run {run_id + 1}/{NUM_RUNS} | TTL={ttl} | variant={variant} "
                       f"({NUM_QUERIES} Queries)...")
-                latencies = []
-                recalls = []
 
                 for i, query_vector in enumerate(queries):
                     entry_node = entry_nodes[i]
@@ -131,16 +130,11 @@ def run_evaluation():
                     try:
                         t0 = time.time()
                         response = stubs[entry_node].SearchSimilar(request, timeout=10.0)
-                        latencies.append((time.time() - t0) * 1000)
+                        results[ttl][variant]["latencies"].append((time.time() - t0) * 1000)
                         matches = sum(1 for d in response.distances[:K] if d <= gt_max + 1e-5)
-                        recalls.append(min(matches, K) / K)
+                        results[ttl][variant]["recalls"].append(min(matches, K) / K)
                     except grpc.RpcError:
                         pass
-
-                if recalls:
-                    results[ttl][variant].append(
-                        (np.mean(recalls) * 100, latencies)
-                    )
 
     for ch in channels.values():
         ch.close()
@@ -151,28 +145,34 @@ def run_evaluation():
 
     for ttl in TTL_VALUES:
         for variant in variants:
-            run_data = results[ttl][variant]
-            if not run_data:
+            data = results[ttl][variant]
+            recalls = data["recalls"]
+            latencies = data["latencies"]
+            if not recalls:
                 continue
-            recall_vals = [r for r, _ in run_data]
-            all_lats = [l for _, lats in run_data for l in lats]
-            avg_recall = np.mean(recall_vals)
-            std_recall = np.std(recall_vals)
-            avg_lat = np.mean(all_lats)
-            std_lat = np.std(all_lats)
-            p95_lat = np.percentile(all_lats, 95)
+            n = len(recalls)
+            avg_recall = np.mean(recalls) * 100
+            std_recall = np.std(recalls) * 100
+            sem_recall = std_recall / np.sqrt(n)
+            avg_lat    = np.mean(latencies)
+            std_lat    = np.std(latencies)
+            sem_lat    = std_lat / np.sqrt(n)
+            p95_lat    = np.percentile(latencies, 95)
 
             print(f"TTL={ttl} [{variant}]: "
-                  f"{avg_recall:.2f}±{std_recall:.2f}%, "
-                  f"{avg_lat:.1f}±{std_lat:.1f} ms  p95={p95_lat:.1f} ms")
+                  f"{avg_recall:.2f}±{sem_recall:.2f}%  (std={std_recall:.2f}), "
+                  f"{avg_lat:.1f}±{sem_lat:.1f} ms  p95={p95_lat:.1f} ms  (n={n})")
             csv_rows.append({
                 "ttl": ttl,
                 "variant": variant,
-                "recall_mean": round(avg_recall, 4),
-                "recall_std": round(std_recall, 4),
+                "n_queries": n,
+                "recall_mean":     round(avg_recall, 4),
+                "recall_std":      round(std_recall, 4),
+                "recall_sem":      round(sem_recall, 4),
                 "latency_mean_ms": round(avg_lat, 4),
-                "latency_std_ms": round(std_lat, 4),
-                "latency_p95_ms": round(p95_lat, 4),
+                "latency_std_ms":  round(std_lat, 4),
+                "latency_sem_ms":  round(sem_lat, 4),
+                "latency_p95_ms":  round(p95_lat, 4),
             })
 
     if csv_rows:
