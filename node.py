@@ -105,7 +105,7 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
         local_res = self.local_graph.search_local(query_vec, local_budget, "127.0.0.1", self.port)
         combined_res = list(local_res)
 
-        best_dist = float(local_res[-1][2]) if local_res else request.best_dist_so_far
+        kth_dist = float(local_res[-1][2]) if local_res else request.kth_dist
 
         if request.ttl > 0:
             remote_res = await self.router.distributed_search(
@@ -114,7 +114,7 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
                 request.k,
                 request.ttl,
                 visited,
-                best_dist_so_far=best_dist,
+                kth_dist=kth_dist,
                 fanout_k=fanout_k,
             )
             combined_res.extend(remote_res)

@@ -67,7 +67,7 @@ def make_request(query_vector, k, ttl, variant, fanout_k):
     query_bytes = np.array(query_vector, dtype=np.float32).tobytes()
     vec = p2p_pb2.Vector(values=query_bytes)
 
-    best_dist = EARLY_STOP_THRESHOLD if (EARLY_STOP_ENABLED and variant == "global_trim") else 0.0
+    kth_dist = EARLY_STOP_THRESHOLD if (EARLY_STOP_ENABLED and variant == "global_trim") else 0.0
 
     return p2p_pb2.SearchRequest(
         query=vec,
@@ -76,7 +76,7 @@ def make_request(query_vector, k, ttl, variant, fanout_k):
         visited_peers=[],
         sender_ip="127.0.0.1",
         sender_port=9999,
-        best_dist_so_far=best_dist,
+        kth_dist=kth_dist,
         fanout_k=fanout_k,
     )
 

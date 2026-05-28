@@ -17,7 +17,7 @@ class DistributedRouter:
         return self._channel_pool[target]
 
     async def ask_neighbor_for_vectors(self, target, query_vector, k, ttl, visited_peers,
-                                       best_dist_so_far=0.0, fanout_k=0):
+                                       kth_dist=0.0, fanout_k=0):
         channel = self._get_channel(target)
         stub = p2p_pb2_grpc.VectorStoreStub(channel)
 
@@ -31,7 +31,7 @@ class DistributedRouter:
             visited_peers=list(visited_peers),
             sender_ip=self.my_ip,
             sender_port=self.my_port,
-            best_dist_so_far=best_dist_so_far,
+            kth_dist=kth_dist,
             fanout_k=fanout_k,
         )
 
@@ -42,7 +42,7 @@ class DistributedRouter:
             return []
         
     async def distributed_search(self, local_graph, query_vector, k, ttl, visited_peers,
-                                 best_dist_so_far=0.0, fanout_k=0):
+                                 kth_dist=0.0, fanout_k=0):
         my_target = f"{self.my_ip}:{self.my_port}"
 
         if visited_peers is None:
@@ -55,7 +55,7 @@ class DistributedRouter:
             return []
 
         from config import EARLY_STOP_ENABLED, EARLY_STOP_THRESHOLD, ROUTING_FANOUT
-        if EARLY_STOP_ENABLED and best_dist_so_far > 0 and best_dist_so_far <= EARLY_STOP_THRESHOLD:
+        if EARLY_STOP_ENABLED and kth_dist > 0 and kth_dist <= EARLY_STOP_THRESHOLD:
             return []
 
         decision = local_graph.evaluate_next_hop(
@@ -69,7 +69,7 @@ class DistributedRouter:
         tasks = [
             self.ask_neighbor_for_vectors(
                 target, query_vector, k, ttl - 1, list(visited_peers),
-                best_dist_so_far=best_dist_so_far, fanout_k=fanout_k
+                kth_dist=kth_dist, fanout_k=fanout_k
             )
             for target in targets
         ]

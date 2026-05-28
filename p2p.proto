@@ -23,7 +23,7 @@ message SearchRequest {
   repeated string visited_peers = 4;
   string sender_ip = 5;
   int32 sender_port = 6;
-  float best_dist_so_far = 7;
+  float kth_dist = 7;
   int32 fanout_k = 8;
 }
 
