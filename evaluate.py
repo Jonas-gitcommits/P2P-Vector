@@ -6,15 +6,18 @@ import time
 import random
 import csv
 import faiss
-from config import NUM_NODES, SUBSET_SIZE, EARLY_STOP_ENABLED, EARLY_STOP_THRESHOLD, EVAL_VARIANT
+from config import (
+    NUM_NODES, SUBSET_SIZE, EARLY_STOP_ENABLED, EARLY_STOP_THRESHOLD, EVAL_VARIANT,
+    TOXIPROXY_ENABLED, PROXY_PORT_START, REAL_PORT_START,
+)
 
 NUM_QUERIES = 1000
 NUM_RUNS = 3
 DIMENSION = 128
 K = 3
 TTL_VALUES = [2, 4, 6, 8, 10]
-START_PORT = 5000
-ALL_NODES = [f"127.0.0.1:{START_PORT + i}" for i in range(NUM_NODES)]
+_PORT_START = PROXY_PORT_START if TOXIPROXY_ENABLED else REAL_PORT_START
+ALL_NODES = [f"127.0.0.1:{_PORT_START + i}" for i in range(NUM_NODES)]
 
 def build_ground_truth_max_dists(dataset, queries, full_gt):
     central_index = None
@@ -136,7 +139,7 @@ def run_evaluation():
 
                 if recalls:
                     results[ttl][variant].append(
-                        (np.mean(recalls) * 100, np.mean(latencies))
+                        (np.mean(recalls) * 100, latencies)
                     )
 
     for ch in channels.values():
@@ -152,15 +155,16 @@ def run_evaluation():
             if not run_data:
                 continue
             recall_vals = [r for r, _ in run_data]
-            lat_vals = [l for _, l in run_data]
+            all_lats = [l for _, lats in run_data for l in lats]
             avg_recall = np.mean(recall_vals)
             std_recall = np.std(recall_vals)
-            avg_lat = np.mean(lat_vals)
-            std_lat = np.std(lat_vals)
+            avg_lat = np.mean(all_lats)
+            std_lat = np.std(all_lats)
+            p95_lat = np.percentile(all_lats, 95)
 
             print(f"TTL={ttl} [{variant}]: "
                   f"{avg_recall:.2f}±{std_recall:.2f}%, "
-                  f"{avg_lat:.1f}±{std_lat:.1f} ms  ")
+                  f"{avg_lat:.1f}±{std_lat:.1f} ms  p95={p95_lat:.1f} ms")
             csv_rows.append({
                 "ttl": ttl,
                 "variant": variant,
@@ -168,6 +172,7 @@ def run_evaluation():
                 "recall_std": round(std_recall, 4),
                 "latency_mean_ms": round(avg_lat, 4),
                 "latency_std_ms": round(std_lat, 4),
+                "latency_p95_ms": round(p95_lat, 4),
             })
 
     if csv_rows:

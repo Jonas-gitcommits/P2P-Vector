@@ -147,26 +147,26 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
             neighbor_count=len(self.local_graph.neighbors)
         )
 
-async def serve(port, bootstrap_port=None, node_id=0):
+async def serve(real_port, bootstrap_port=None, node_id=0, proxy_port=None):
+    proxy_port = proxy_port or real_port
     local_graph = LocalGraphState()
 
     try:
         from config import VECTORS_PER_NODE, NUM_NODES, REPLICATION
         dataset = np.load("dataset.npy")
         chunk_size = VECTORS_PER_NODE
-        
+
         start_idx = node_id * chunk_size
         if start_idx + chunk_size > len(dataset):
             raise RuntimeError(
                 f"dataset.npy zu klein!"
                 f"Bitte `python generate_data.py` erneut ausführen."
-                
             )
         my_chunk = dataset[start_idx:start_idx + chunk_size]
         for vec in my_chunk:
             local_graph.insert_local(vec.tolist())
 
-        print(f"[Node {port}] ID {node_id}: {len(my_chunk)} Vektoren geladen.")
+        print(f"[Node {proxy_port}] ID {node_id}: {len(my_chunk)} Vektoren geladen.")
 
         if REPLICATION:
             replica_id = (node_id + 1) % NUM_NODES
@@ -174,32 +174,34 @@ async def serve(port, bootstrap_port=None, node_id=0):
             replica_chunk = dataset[replica_start:replica_start + chunk_size]
             for vec in replica_chunk:
                 local_graph.insert_local(vec.tolist())
-            print(f"[Node {port}] Replikat von ID {replica_id}: {len(replica_chunk)} Vektoren geladen.")
+            print(f"[Node {proxy_port}] Replikat von ID {replica_id}: {len(replica_chunk)} Vektoren geladen.")
     except FileNotFoundError:
-        print(f"[Node {port}] Fehler: dataset.npy nicht gefunden!")
+        print(f"[Node {proxy_port}] Fehler: dataset.npy nicht gefunden!")
 
     if bootstrap_port and bootstrap_port != "None":
         local_graph.add_neighbor_edge("127.0.0.1", int(bootstrap_port), [0.0] * 128)
 
     from protocol import DistributedRouter
-    router = DistributedRouter("127.0.0.1", port)
+    router = DistributedRouter("127.0.0.1", proxy_port)
 
     asyncio.create_task(router.health_check_loop(local_graph))
     asyncio.create_task(router.start_gossip_loop(local_graph))
-    
+
     server = grpc.aio.server()
-    
+
     p2p_pb2_grpc.add_VectorStoreServicer_to_server(
-        VectorStoreServicer(port, local_graph, router), server
+        VectorStoreServicer(proxy_port, local_graph, router), server
     )
-    server.add_insecure_port(f'[::]:{port}')
     
+    server.add_insecure_port(f'[::]:{real_port}')
+
     await server.start()
     await server.wait_for_termination()
 
 if __name__ == '__main__':
-    p = int(sys.argv[1]) if len(sys.argv) > 1 else 5000
+    real_p = int(sys.argv[1]) if len(sys.argv) > 1 else 5000
     b = sys.argv[2] if len(sys.argv) > 2 else None
     n_id = int(sys.argv[3]) if len(sys.argv) > 3 else 0
-    
-    asyncio.run(serve(p, b, n_id))
+    proxy_p = int(sys.argv[4]) if len(sys.argv) > 4 else real_p
+
+    asyncio.run(serve(real_p, b, n_id, proxy_p))
