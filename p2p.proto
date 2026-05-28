@@ -25,6 +25,7 @@ message SearchRequest {
   int32 sender_port = 6;
   float kth_dist = 7;
   int32 fanout_k = 8;
+  float early_stop_threshold = 9;
 }
 
 message SearchResponse {

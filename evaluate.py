@@ -63,11 +63,11 @@ def resolve_variants(eval_variant):
     return ["local_trim", "global_trim"]
 
 
-def make_request(query_vector, k, ttl, variant, fanout_k):
+def make_request(query_vector, k, ttl, variant, fanout_k, early_stop_threshold=0.0):
     query_bytes = np.array(query_vector, dtype=np.float32).tobytes()
     vec = p2p_pb2.Vector(values=query_bytes)
 
-    kth_dist = EARLY_STOP_THRESHOLD if (EARLY_STOP_ENABLED and variant == "global_trim") else 0.0
+    kth_dist = early_stop_threshold if (early_stop_threshold > 0 and variant == "global_trim") else 0.0
 
     return p2p_pb2.SearchRequest(
         query=vec,
@@ -78,6 +78,7 @@ def make_request(query_vector, k, ttl, variant, fanout_k):
         sender_port=9999,
         kth_dist=kth_dist,
         fanout_k=fanout_k,
+        early_stop_threshold=early_stop_threshold,
     )
 
 
@@ -109,6 +110,7 @@ def run_evaluation():
 
     variants = resolve_variants(EVAL_VARIANT)
     fanout_k = max(K * 4, 20)
+    es_threshold = EARLY_STOP_THRESHOLD if EARLY_STOP_ENABLED else 0.0
 
     results = {ttl: {v: {"recalls": [], "latencies": []} for v in variants}
                for ttl in TTL_VALUES}
@@ -125,7 +127,7 @@ def run_evaluation():
                 for i, query_vector in enumerate(queries):
                     entry_node = entry_nodes[i]
                     gt_max = gt_max_dists[i]
-                    request = make_request(query_vector, K, ttl, variant, fanout_k)
+                    request = make_request(query_vector, K, ttl, variant, fanout_k, es_threshold)
 
                     try:
                         t0 = time.time()

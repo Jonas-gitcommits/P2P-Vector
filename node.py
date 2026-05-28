@@ -116,6 +116,7 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
                 visited,
                 kth_dist=kth_dist,
                 fanout_k=fanout_k,
+                early_stop_threshold=request.early_stop_threshold,
             )
             combined_res.extend(remote_res)
 
