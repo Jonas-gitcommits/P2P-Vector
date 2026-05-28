@@ -54,21 +54,22 @@ class DistributedRouter:
         if ttl <= 0:
             return []
 
-        from config import EARLY_STOP_ENABLED, EARLY_STOP_THRESHOLD
+        from config import EARLY_STOP_ENABLED, EARLY_STOP_THRESHOLD, ROUTING_FANOUT
         if EARLY_STOP_ENABLED and best_dist_so_far > 0 and best_dist_so_far <= EARLY_STOP_THRESHOLD:
             return []
 
-        decision = local_graph.evaluate_next_hop(query_vector, visited_peers)
+        decision = local_graph.evaluate_next_hop(
+            query_vector, visited_peers, fanout=ROUTING_FANOUT
+        )
         if decision["action"] == "stop" or not decision["targets"]:
             return []
 
-        effective_fanout = fanout_k if fanout_k > 0 else len(decision["targets"])
-        targets = decision["targets"][:effective_fanout]
+        targets = decision["targets"][:ROUTING_FANOUT]
 
         tasks = [
             self.ask_neighbor_for_vectors(
                 target, query_vector, k, ttl - 1, list(visited_peers),
-                best_dist_so_far=best_dist_so_far, fanout_k=effective_fanout
+                best_dist_so_far=best_dist_so_far, fanout_k=fanout_k
             )
             for target in targets
         ]

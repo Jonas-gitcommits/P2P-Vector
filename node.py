@@ -40,7 +40,7 @@ class LocalGraphState:
         idx = random.randint(0, self.local_index.ntotal - 1)
         return self.local_index.reconstruct(idx).tolist()
 
-    def evaluate_next_hop(self, query_vector, visited_peers, best_dist_so_far=None):
+    def evaluate_next_hop(self, query_vector, visited_peers, best_dist_so_far=None, fanout=2):
         query_np = np.array(query_vector, dtype=np.float32)
         valid_neighbors = []
         for target, vectors in self.neighbors.items():
@@ -54,7 +54,7 @@ class LocalGraphState:
             return {"action": "stop", "targets": []}
 
         valid_neighbors.sort(key=lambda x: x[1])
-        best_targets = [n[0] for n in valid_neighbors[:2]]
+        best_targets = [n[0] for n in valid_neighbors[:fanout]]
         return {"action": "hop", "targets": best_targets}
 
     def add_neighbor_edge(self, ip, port, vector):
@@ -77,7 +77,7 @@ class LocalGraphState:
             neighbor_distances.sort(key=lambda x: x[0])
             best_neighbors = neighbor_distances[:6]
             remaining = neighbor_distances[6:]
-            random_picks = random.sample(remaining, 2)
+            random_picks = random.sample(remaining, min(2, len(remaining)))
  
             self.neighbors = {}
             for _, t, v_list in best_neighbors + random_picks:
