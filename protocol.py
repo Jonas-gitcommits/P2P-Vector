@@ -4,7 +4,10 @@ import p2p_pb2
 import p2p_pb2_grpc
 import asyncio
 import random
-from config import GOSSIP_INTERVAL_S, HEALTH_CHECK_INTERVAL_S, RPC_TIMEOUT_S, PING_TIMEOUT_S
+from config import (
+    GOSSIP_INTERVAL_S, HEALTH_CHECK_INTERVAL_S, PING_TIMEOUT_S,
+    RPC_TIMEOUT_BASE_S, LATENCY_PRESETS, LATENCY_SCENARIO,
+)
 
 class DistributedRouter:
     def __init__(self, my_ip, my_port):
@@ -37,8 +40,11 @@ class DistributedRouter:
             early_stop_threshold=early_stop_threshold,
         )
 
+        lat_ms, jitter_ms = LATENCY_PRESETS.get(LATENCY_SCENARIO, (0, 0))
+        timeout = ttl * (lat_ms + jitter_ms) / 1000 + RPC_TIMEOUT_BASE_S
+
         try:
-            response = await stub.SearchSimilar(request, timeout=RPC_TIMEOUT_S)
+            response = await stub.SearchSimilar(request, timeout=timeout)
             return {
                 "peers": [
                     (p.ip, p.port, d, gid)
@@ -77,9 +83,11 @@ class DistributedRouter:
 
         targets = decision["targets"][:ROUTING_FANOUT]
 
+        visited_with_siblings = list(set(visited_peers) | set(targets))
+
         tasks = [
             self.ask_neighbor_for_vectors(
-                target, query_vector, k, ttl - 1, list(visited_peers),
+                target, query_vector, k, ttl - 1, visited_with_siblings,
                 kth_dist=kth_dist, fanout_k=fanout_k, early_stop_threshold=early_stop_threshold
             )
             for target in targets
