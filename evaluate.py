@@ -9,13 +9,8 @@ import faiss
 from config import (
     NUM_NODES, SUBSET_SIZE, EARLY_STOP_ENABLED, EARLY_STOP_THRESHOLD, EVAL_VARIANT,
     TOXIPROXY_ENABLED, PROXY_PORT_START, REAL_PORT_START,
+    NUM_QUERIES, NUM_RUNS, K, TTL_VALUES, DIMENSION, GOSSIP_WARMUP_S,
 )
-
-NUM_QUERIES = 1000
-NUM_RUNS = 3
-DIMENSION = 128
-K = 3
-TTL_VALUES = [2, 4, 6, 8, 10]
 _PORT_START = PROXY_PORT_START if TOXIPROXY_ENABLED else REAL_PORT_START
 ALL_NODES = [f"127.0.0.1:{_PORT_START + i}" for i in range(NUM_NODES)]
 
@@ -82,35 +77,39 @@ def make_request(query_vector, k, ttl, variant, fanout_k, early_stop_threshold=0
     )
 
 
-def run_evaluation():
+def run_evaluation(early_stop_threshold=None, gossip_warmup_s=GOSSIP_WARMUP_S,
+                   scenario_label="default"):
+    if early_stop_threshold is None:
+        early_stop_threshold = EARLY_STOP_THRESHOLD if EARLY_STOP_ENABLED else 0.0
+
     print("Lade Datensatz...")
     dataset = np.load("dataset.npy").astype(np.float32)
     all_queries = np.load("queries.npy").astype(np.float32)
     full_gt = np.load("ground_truth.npy")
     queries = all_queries[:NUM_QUERIES]
     print(f"  dataset: {dataset.shape}, queries: {queries.shape}")
-    print(f"  SUBSET_SIZE={SUBSET_SIZE}, EARLY_STOP_ENABLED={EARLY_STOP_ENABLED}, "
-          f"THRESHOLD={EARLY_STOP_THRESHOLD}, EVAL_VARIANT={EVAL_VARIANT}")
+    print(f"  SUBSET_SIZE={SUBSET_SIZE}, early_stop_threshold={early_stop_threshold}, "
+          f"EVAL_VARIANT={EVAL_VARIANT}, scenario={scenario_label}")
 
     print("Berechne Ground-Truth-Distanzen...")
     gt_max_dists = build_ground_truth_max_dists(dataset, queries, full_gt)
     print(f"  Fertig: {len(gt_max_dists)} Distanzen.\n")
 
-    print("Warte 10s für Gossip-Konvergenz...")
-    time.sleep(10)
+    if gossip_warmup_s > 0:
+        print(f"Warte {gossip_warmup_s}s für Gossip-Konvergenz...")
+        time.sleep(gossip_warmup_s)
 
     alive_nodes = get_alive_nodes(ALL_NODES)
     print(f"Erreichbar: {len(alive_nodes)}/{len(ALL_NODES)}")
     if not alive_nodes:
         print("Keine Knoten erreichbar! Abbruch.")
-        return
+        return []
 
     channels = {n: grpc.insecure_channel(n) for n in alive_nodes}
     stubs = {n: p2p_pb2_grpc.VectorStoreStub(channels[n]) for n in alive_nodes}
 
     variants = resolve_variants(EVAL_VARIANT)
     fanout_k = max(K * 4, 20)
-    es_threshold = EARLY_STOP_THRESHOLD if EARLY_STOP_ENABLED else 0.0
 
     results = {ttl: {v: {"recalls": [], "latencies": [], "rpcs": [], "unique": []} for v in variants}
                for ttl in TTL_VALUES}
@@ -127,7 +126,8 @@ def run_evaluation():
                 for i, query_vector in enumerate(queries):
                     entry_node = entry_nodes[i]
                     gt_max = gt_max_dists[i]
-                    request = make_request(query_vector, K, ttl, variant, fanout_k, es_threshold)
+                    request = make_request(query_vector, K, ttl, variant, fanout_k,
+                                          early_stop_threshold)
 
                     try:
                         t0 = time.time()
@@ -144,7 +144,6 @@ def run_evaluation():
         ch.close()
 
     print()
-    csv_path = f"results_{EVAL_VARIANT}.csv"
     csv_rows = []
 
     for ttl in TTL_VALUES:
@@ -175,30 +174,33 @@ def run_evaluation():
                   f"rpcs={avg_rpcs:.0f} p95={p95_rpcs:.0f}  "
                   f"unique={avg_unique:.1f} p95={p95_unique:.0f}  (n={n})")
             csv_rows.append({
+                "scenario": scenario_label,
                 "ttl": ttl,
                 "variant": variant,
                 "n_queries": n,
-                "recall_mean":      round(avg_recall, 4),
-                "recall_std":       round(std_recall, 4),
-                "recall_sem":       round(sem_recall, 4),
-                "latency_mean_ms":  round(avg_lat, 4),
-                "latency_std_ms":   round(std_lat, 4),
-                "latency_sem_ms":   round(sem_lat, 4),
-                "latency_p95_ms":   round(p95_lat, 4),
-                "rpc_count_mean":   round(avg_rpcs, 2),
-                "rpc_count_p95":    round(p95_rpcs, 1),
+                "recall_mean":       round(avg_recall, 4),
+                "recall_std":        round(std_recall, 4),
+                "recall_sem":        round(sem_recall, 4),
+                "latency_mean_ms":   round(avg_lat, 4),
+                "latency_std_ms":    round(std_lat, 4),
+                "latency_sem_ms":    round(sem_lat, 4),
+                "latency_p95_ms":    round(p95_lat, 4),
+                "rpc_count_mean":    round(avg_rpcs, 2),
+                "rpc_count_p95":     round(p95_rpcs, 1),
                 "unique_nodes_mean": round(avg_unique, 2),
-                "unique_nodes_p95": round(p95_unique, 1),
+                "unique_nodes_p95":  round(p95_unique, 1),
             })
 
-    if csv_rows:
-        fieldnames = list(csv_rows[0].keys())
-        with open(csv_path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(csv_rows)
-        print(f"\nCSV gespeichert: {csv_path}")
+    return csv_rows
 
 
 if __name__ == "__main__":
-    run_evaluation()
+    rows = run_evaluation()
+    if rows:
+        csv_path = f"results_{EVAL_VARIANT}.csv"
+        fieldnames = list(rows[0].keys())
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+        print(f"\nCSV gespeichert: {csv_path}")

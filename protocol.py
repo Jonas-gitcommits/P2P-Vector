@@ -4,6 +4,7 @@ import p2p_pb2
 import p2p_pb2_grpc
 import asyncio
 import random
+from config import GOSSIP_INTERVAL_S, HEALTH_CHECK_INTERVAL_S, RPC_TIMEOUT_S, PING_TIMEOUT_S
 
 class DistributedRouter:
     def __init__(self, my_ip, my_port):
@@ -37,7 +38,7 @@ class DistributedRouter:
         )
 
         try:
-            response = await stub.SearchSimilar(request, timeout=1.5)
+            response = await stub.SearchSimilar(request, timeout=RPC_TIMEOUT_S)
             return {
                 "peers": [(p.ip, p.port, d) for p, d in zip(response.nearest_peers, response.distances)],
                 "rpc_count": response.rpc_count,
@@ -102,7 +103,7 @@ class DistributedRouter:
 
     async def start_gossip_loop(self, local_graph):
         while True:
-            await asyncio.sleep(5)
+            await asyncio.sleep(GOSSIP_INTERVAL_S)
             if not local_graph.neighbors:
                 continue
 
@@ -123,7 +124,7 @@ class DistributedRouter:
     
     async def health_check_loop(self, local_graph):
         while True:
-            await asyncio.sleep(5)
+            await asyncio.sleep(HEALTH_CHECK_INTERVAL_S)
             dead_targets = []
             
             for target in list(local_graph.neighbors.keys()):
@@ -131,7 +132,7 @@ class DistributedRouter:
                 stub = p2p_pb2_grpc.VectorStoreStub(channel)
                 
                 try:
-                    await stub.Ping(p2p_pb2.PingRequest(), timeout=1.0)
+                    await stub.Ping(p2p_pb2.PingRequest(), timeout=PING_TIMEOUT_S)
                 except grpc.RpcError:
                     dead_targets.append(target)
             

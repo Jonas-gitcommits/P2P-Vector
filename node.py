@@ -6,11 +6,10 @@ import numpy as np
 import faiss
 import random
 import sys
-
-MAX_NEIGHBORS = 8
+from config import MAX_NEIGHBORS, HNSW_M, DIMENSION
 
 class LocalGraphState:
-    def __init__(self, dimension=128, M=32):
+    def __init__(self, dimension=DIMENSION, M=HNSW_M):
         self.dimension = dimension
         self.local_index = faiss.IndexHNSWFlat(dimension, M)
         self.neighbors = {}  

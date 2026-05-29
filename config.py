@@ -7,6 +7,21 @@ EARLY_STOP_THRESHOLD = 44000.0
 EVAL_VARIANT = "both"
 ROUTING_FANOUT = 2
 
+DIMENSION = 128
+MAX_NEIGHBORS = 8
+HNSW_M = 32
+
+GOSSIP_INTERVAL_S = 5
+HEALTH_CHECK_INTERVAL_S = 5
+RPC_TIMEOUT_S = 1.5
+PING_TIMEOUT_S = 1.0
+
+NUM_QUERIES = 1000
+NUM_RUNS = 3
+K = 3
+TTL_VALUES = [2, 4, 6, 8, 10]
+GOSSIP_WARMUP_S = 10
+
 LATENCY_PRESETS = {
     "none":             (0,   0),
     "lan":              (1,   1),
@@ -15,7 +30,7 @@ LATENCY_PRESETS = {
     "intercontinental": (100, 30),
     "mobile":           (150, 80),
 }
-LATENCY_SCENARIO = "lan"
+LATENCY_SCENARIO = "none"
 
 TOXIPROXY_ENABLED = True
 TOXIPROXY_HOST = '127.0.0.1'
