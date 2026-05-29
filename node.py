@@ -6,11 +6,10 @@ import numpy as np
 import faiss
 import random
 import sys
-
-MAX_NEIGHBORS = 8
+from config import MAX_NEIGHBORS, HNSW_M, DIMENSION
 
 class LocalGraphState:
-    def __init__(self, dimension=128, M=32):
+    def __init__(self, dimension=DIMENSION, M=HNSW_M):
         self.dimension = dimension
         self.local_index = faiss.IndexHNSWFlat(dimension, M)
         self.neighbors = {}  
@@ -40,7 +39,7 @@ class LocalGraphState:
         idx = random.randint(0, self.local_index.ntotal - 1)
         return self.local_index.reconstruct(idx).tolist()
 
-    def evaluate_next_hop(self, query_vector, visited_peers, best_dist_so_far=None):
+    def evaluate_next_hop(self, query_vector, visited_peers, best_dist_so_far=None, fanout=2):
         query_np = np.array(query_vector, dtype=np.float32)
         valid_neighbors = []
         for target, vectors in self.neighbors.items():
@@ -54,7 +53,7 @@ class LocalGraphState:
             return {"action": "stop", "targets": []}
 
         valid_neighbors.sort(key=lambda x: x[1])
-        best_targets = [n[0] for n in valid_neighbors[:2]]
+        best_targets = [n[0] for n in valid_neighbors[:fanout]]
         return {"action": "hop", "targets": best_targets}
 
     def add_neighbor_edge(self, ip, port, vector):
@@ -77,7 +76,7 @@ class LocalGraphState:
             neighbor_distances.sort(key=lambda x: x[0])
             best_neighbors = neighbor_distances[:6]
             remaining = neighbor_distances[6:]
-            random_picks = random.sample(remaining, 2)
+            random_picks = random.sample(remaining, min(2, len(remaining)))
  
             self.neighbors = {}
             for _, t, v_list in best_neighbors + random_picks:
@@ -105,19 +104,25 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
         local_res = self.local_graph.search_local(query_vec, local_budget, "127.0.0.1", self.port)
         combined_res = list(local_res)
 
-        best_dist = float(local_res[-1][2]) if local_res else request.best_dist_so_far
+        kth_dist = float(local_res[-1][2]) if local_res else request.kth_dist
+        my_id = f"127.0.0.1:{self.port}"
+        rpc_count = 1
+        visited_nodes = {my_id}
 
         if request.ttl > 0:
-            remote_res = await self.router.distributed_search(
+            remote_result = await self.router.distributed_search(
                 self.local_graph,
                 query_vec,
                 request.k,
                 request.ttl,
                 visited,
-                best_dist_so_far=best_dist,
+                kth_dist=kth_dist,
                 fanout_k=fanout_k,
+                early_stop_threshold=request.early_stop_threshold,
             )
-            combined_res.extend(remote_res)
+            combined_res.extend(remote_result["peers"])
+            rpc_count += remote_result["rpc_count"]
+            visited_nodes |= remote_result["visited_nodes"]
 
         combined_res.sort(key=lambda x: x[2])
 
@@ -138,7 +143,9 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
             p.ip = ip
             p.port = port
             response.distances.append(dist)
-            
+        response.rpc_count = rpc_count
+        response.visited_nodes.extend(sorted(visited_nodes))
+
         return response
     
     async def Ping(self, request, context):
@@ -147,26 +154,26 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
             neighbor_count=len(self.local_graph.neighbors)
         )
 
-async def serve(port, bootstrap_port=None, node_id=0):
+async def serve(real_port, bootstrap_port=None, node_id=0, proxy_port=None):
+    proxy_port = proxy_port or real_port
     local_graph = LocalGraphState()
 
     try:
         from config import VECTORS_PER_NODE, NUM_NODES, REPLICATION
         dataset = np.load("dataset.npy")
         chunk_size = VECTORS_PER_NODE
-        
+
         start_idx = node_id * chunk_size
         if start_idx + chunk_size > len(dataset):
             raise RuntimeError(
                 f"dataset.npy zu klein!"
                 f"Bitte `python generate_data.py` erneut ausführen."
-                
             )
         my_chunk = dataset[start_idx:start_idx + chunk_size]
         for vec in my_chunk:
             local_graph.insert_local(vec.tolist())
 
-        print(f"[Node {port}] ID {node_id}: {len(my_chunk)} Vektoren geladen.")
+        print(f"[Node {proxy_port}] ID {node_id}: {len(my_chunk)} Vektoren geladen.")
 
         if REPLICATION:
             replica_id = (node_id + 1) % NUM_NODES
@@ -174,32 +181,34 @@ async def serve(port, bootstrap_port=None, node_id=0):
             replica_chunk = dataset[replica_start:replica_start + chunk_size]
             for vec in replica_chunk:
                 local_graph.insert_local(vec.tolist())
-            print(f"[Node {port}] Replikat von ID {replica_id}: {len(replica_chunk)} Vektoren geladen.")
+            print(f"[Node {proxy_port}] Replikat von ID {replica_id}: {len(replica_chunk)} Vektoren geladen.")
     except FileNotFoundError:
-        print(f"[Node {port}] Fehler: dataset.npy nicht gefunden!")
+        print(f"[Node {proxy_port}] Fehler: dataset.npy nicht gefunden!")
 
     if bootstrap_port and bootstrap_port != "None":
         local_graph.add_neighbor_edge("127.0.0.1", int(bootstrap_port), [0.0] * 128)
 
     from protocol import DistributedRouter
-    router = DistributedRouter("127.0.0.1", port)
+    router = DistributedRouter("127.0.0.1", proxy_port)
 
     asyncio.create_task(router.health_check_loop(local_graph))
     asyncio.create_task(router.start_gossip_loop(local_graph))
-    
+
     server = grpc.aio.server()
-    
+
     p2p_pb2_grpc.add_VectorStoreServicer_to_server(
-        VectorStoreServicer(port, local_graph, router), server
+        VectorStoreServicer(proxy_port, local_graph, router), server
     )
-    server.add_insecure_port(f'[::]:{port}')
     
+    server.add_insecure_port(f'[::]:{real_port}')
+
     await server.start()
     await server.wait_for_termination()
 
 if __name__ == '__main__':
-    p = int(sys.argv[1]) if len(sys.argv) > 1 else 5000
+    real_p = int(sys.argv[1]) if len(sys.argv) > 1 else 5000
     b = sys.argv[2] if len(sys.argv) > 2 else None
     n_id = int(sys.argv[3]) if len(sys.argv) > 3 else 0
-    
-    asyncio.run(serve(p, b, n_id))
+    proxy_p = int(sys.argv[4]) if len(sys.argv) > 4 else real_p
+
+    asyncio.run(serve(real_p, b, n_id, proxy_p))

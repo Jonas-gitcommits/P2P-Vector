@@ -4,6 +4,7 @@ import p2p_pb2
 import p2p_pb2_grpc
 import asyncio
 import random
+from config import GOSSIP_INTERVAL_S, HEALTH_CHECK_INTERVAL_S, RPC_TIMEOUT_S, PING_TIMEOUT_S
 
 class DistributedRouter:
     def __init__(self, my_ip, my_port):
@@ -17,7 +18,7 @@ class DistributedRouter:
         return self._channel_pool[target]
 
     async def ask_neighbor_for_vectors(self, target, query_vector, k, ttl, visited_peers,
-                                       best_dist_so_far=0.0, fanout_k=0):
+                                       kth_dist=0.0, fanout_k=0, early_stop_threshold=0.0):
         channel = self._get_channel(target)
         stub = p2p_pb2_grpc.VectorStoreStub(channel)
 
@@ -31,18 +32,23 @@ class DistributedRouter:
             visited_peers=list(visited_peers),
             sender_ip=self.my_ip,
             sender_port=self.my_port,
-            best_dist_so_far=best_dist_so_far,
+            kth_dist=kth_dist,
             fanout_k=fanout_k,
+            early_stop_threshold=early_stop_threshold,
         )
 
         try:
-            response = await stub.SearchSimilar(request, timeout=1.5)
-            return [(p.ip, p.port, d) for p, d in zip(response.nearest_peers, response.distances)]
+            response = await stub.SearchSimilar(request, timeout=RPC_TIMEOUT_S)
+            return {
+                "peers": [(p.ip, p.port, d) for p, d in zip(response.nearest_peers, response.distances)],
+                "rpc_count": response.rpc_count,
+                "visited_nodes": set(response.visited_nodes),
+            }
         except grpc.RpcError:
-            return []
+            return {"peers": [], "rpc_count": 0, "visited_nodes": set()}
         
     async def distributed_search(self, local_graph, query_vector, k, ttl, visited_peers,
-                                 best_dist_so_far=0.0, fanout_k=0):
+                                 kth_dist=0.0, fanout_k=0, early_stop_threshold=0.0):
         my_target = f"{self.my_ip}:{self.my_port}"
 
         if visited_peers is None:
@@ -52,23 +58,24 @@ class DistributedRouter:
             visited_peers.append(my_target)
 
         if ttl <= 0:
-            return []
+            return {"peers": [], "rpc_count": 0, "visited_nodes": set()}
 
-        from config import EARLY_STOP_ENABLED, EARLY_STOP_THRESHOLD
-        if EARLY_STOP_ENABLED and best_dist_so_far > 0 and best_dist_so_far <= EARLY_STOP_THRESHOLD:
-            return []
+        from config import ROUTING_FANOUT
+        if early_stop_threshold > 0 and kth_dist > 0 and kth_dist <= early_stop_threshold:
+            return {"peers": [], "rpc_count": 0, "visited_nodes": set()}
 
-        decision = local_graph.evaluate_next_hop(query_vector, visited_peers)
+        decision = local_graph.evaluate_next_hop(
+            query_vector, visited_peers, fanout=ROUTING_FANOUT
+        )
         if decision["action"] == "stop" or not decision["targets"]:
-            return []
+            return {"peers": [], "rpc_count": 0, "visited_nodes": set()}
 
-        effective_fanout = fanout_k if fanout_k > 0 else len(decision["targets"])
-        targets = decision["targets"][:effective_fanout]
+        targets = decision["targets"][:ROUTING_FANOUT]
 
         tasks = [
             self.ask_neighbor_for_vectors(
                 target, query_vector, k, ttl - 1, list(visited_peers),
-                best_dist_so_far=best_dist_so_far, fanout_k=effective_fanout
+                kth_dist=kth_dist, fanout_k=fanout_k, early_stop_threshold=early_stop_threshold
             )
             for target in targets
         ]
@@ -76,8 +83,12 @@ class DistributedRouter:
         results = await asyncio.gather(*tasks)
 
         combined_results = []
-        for res_list in results:
-            combined_results.extend(res_list)
+        total_rpcs = 0
+        all_visited = set()
+        for r in results:
+            combined_results.extend(r["peers"])
+            total_rpcs += r["rpc_count"]
+            all_visited |= r["visited_nodes"]
 
         combined_results.sort(key=lambda x: x[2])
         unique_results = []
@@ -88,11 +99,11 @@ class DistributedRouter:
                 seen.add(key)
                 unique_results.append((ip, port, dist))
 
-        return unique_results[:max(fanout_k, k)]
+        return {"peers": unique_results[:max(fanout_k, k)], "rpc_count": total_rpcs, "visited_nodes": all_visited}
 
     async def start_gossip_loop(self, local_graph):
         while True:
-            await asyncio.sleep(5)
+            await asyncio.sleep(GOSSIP_INTERVAL_S)
             if not local_graph.neighbors:
                 continue
 
@@ -104,7 +115,7 @@ class DistributedRouter:
                 results = await self.ask_neighbor_for_vectors(
                     target, my_vector, k=2, ttl=1, visited_peers=[my_target]
                 )
-                for ip, port, _ in results:
+                for ip, port, _ in results["peers"]:
                     if ip == self.my_ip and port == self.my_port:
                         continue
                     local_graph.add_neighbor_edge(ip, port, my_vector)
@@ -113,7 +124,7 @@ class DistributedRouter:
     
     async def health_check_loop(self, local_graph):
         while True:
-            await asyncio.sleep(5)
+            await asyncio.sleep(HEALTH_CHECK_INTERVAL_S)
             dead_targets = []
             
             for target in list(local_graph.neighbors.keys()):
@@ -121,7 +132,7 @@ class DistributedRouter:
                 stub = p2p_pb2_grpc.VectorStoreStub(channel)
                 
                 try:
-                    await stub.Ping(p2p_pb2.PingRequest(), timeout=1.0)
+                    await stub.Ping(p2p_pb2.PingRequest(), timeout=PING_TIMEOUT_S)
                 except grpc.RpcError:
                     dead_targets.append(target)
             
