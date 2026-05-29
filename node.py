@@ -201,7 +201,7 @@ async def serve(real_port, bootstrap_port=None, node_id=0, proxy_port=None):
         VectorStoreServicer(proxy_port, local_graph, router), server
     )
     
-    server.add_insecure_port(f'[::]:{real_port}')
+    server.add_insecure_port(f'127.0.0.1:{real_port}')
 
     await server.start()
     await server.wait_for_termination()

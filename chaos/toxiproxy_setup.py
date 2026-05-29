@@ -5,7 +5,7 @@ import urllib.error
 from config import (
     TOXIPROXY_HOST, TOXIPROXY_API_PORT,
     REAL_PORT_START, PROXY_PORT_START,
-    TOXIC_LATENCY_MS, TOXIC_LATENCY_JITTER_MS, TOXIC_PACKET_LOSS_PCT,
+    TOXIC_LATENCY_MS, TOXIC_LATENCY_JITTER_MS, TOXIC_CONN_DROP_PCT,
 )
 
 _BASE = f"http://{TOXIPROXY_HOST}:{TOXIPROXY_API_PORT}"
@@ -107,10 +107,10 @@ def apply_latency_scenario(num_nodes: int, scenario: str):
     print(f"[Toxiproxy] '{scenario}': {latency_ms}±{jitter_ms} ms auf {num_nodes} Proxies")
 
 
-def add_packet_loss(num_nodes: int):
-    if TOXIC_PACKET_LOSS_PCT <= 0:
+def add_connection_drops(num_nodes: int):
+    if TOXIC_CONN_DROP_PCT <= 0:
         return
-    toxicity = TOXIC_PACKET_LOSS_PCT / 100.0
+    toxicity = TOXIC_CONN_DROP_PCT / 100.0
     for i in range(num_nodes):
         name = f"node_{i}"
         _api("POST", f"/proxies/{name}/toxics", {
@@ -121,8 +121,8 @@ def add_packet_loss(num_nodes: int):
             "attributes": {"bytes": 1},
         })
         print(
-            f"[Toxiproxy] Loss-Toxic auf {name}: "
-            f"{TOXIC_PACKET_LOSS_PCT}% Verbindungsabbrüche (downstream)"
+            f"[Toxiproxy] Verbindungsabbruch-Toxic auf {name}: "
+            f"{TOXIC_CONN_DROP_PCT}% Verbindungsabbrüche (limit_data, 1 Byte, downstream)"
         )
 
 

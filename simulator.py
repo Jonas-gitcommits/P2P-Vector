@@ -38,10 +38,10 @@ def start_network():
     time.sleep(3)
 
     if TOXIPROXY_ENABLED:
-        from chaos.toxiproxy_setup import setup_proxies, apply_latency_scenario, add_packet_loss
+        from chaos.toxiproxy_setup import setup_proxies, apply_latency_scenario, add_connection_drops
         setup_proxies(NUM_NODES)
         apply_latency_scenario(NUM_NODES, LATENCY_SCENARIO)
-        add_packet_loss(NUM_NODES)
+        add_connection_drops(NUM_NODES)
 
     if FAULT_INJECTION_ENABLED:
         _start_chaos_loop()
