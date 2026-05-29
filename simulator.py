@@ -9,6 +9,7 @@ from config import (
     TOXIPROXY_ENABLED, REAL_PORT_START, PROXY_PORT_START,
     FAULT_INJECTION_ENABLED, FAULT_KILL_INTERVAL, FAULT_KILL_PROBABILITY,
     FAULT_MAX_DOWN, FAULT_RESTART_DELAY, FAULT_SEED,
+    LATENCY_SCENARIO,
 )
 
 processes = []
@@ -37,9 +38,9 @@ def start_network():
     time.sleep(3)
 
     if TOXIPROXY_ENABLED:
-        from chaos.toxiproxy_setup import setup_proxies, add_latency_toxic, add_packet_loss
+        from chaos.toxiproxy_setup import setup_proxies, apply_latency_scenario, add_packet_loss
         setup_proxies(NUM_NODES)
-        add_latency_toxic(NUM_NODES)
+        apply_latency_scenario(NUM_NODES, LATENCY_SCENARIO)
         add_packet_loss(NUM_NODES)
 
     if FAULT_INJECTION_ENABLED:

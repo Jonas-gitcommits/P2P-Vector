@@ -81,6 +81,32 @@ def add_latency_toxic(num_nodes: int):
         )
 
 
+def apply_latency_scenario(num_nodes: int, scenario: str):
+    """Entfernt vorhandene latency-toxics und setzt sie fürs Szenario neu.
+    loss-toxics bleiben unberührt. Zur Laufzeit aufrufbar."""
+    from config import LATENCY_PRESETS
+    if scenario not in LATENCY_PRESETS:
+        raise ValueError(f"Unbekanntes Szenario: {scenario}")
+    latency_ms, jitter_ms = LATENCY_PRESETS[scenario]
+    for i in range(num_nodes):
+        name = f"node_{i}"
+        try:
+            _api("DELETE", f"/proxies/{name}/toxics/latency_downstream")
+        except (RuntimeError, urllib.error.HTTPError):
+            pass
+    if latency_ms == 0 and jitter_ms == 0:
+        print(f"[Toxiproxy] Szenario '{scenario}': keine Latenz-Toxics")
+        return
+    for i in range(num_nodes):
+        name = f"node_{i}"
+        _api("POST", f"/proxies/{name}/toxics", {
+            "name": "latency_downstream", "type": "latency",
+            "stream": "downstream", "toxicity": 1.0,
+            "attributes": {"latency": latency_ms, "jitter": jitter_ms},
+        })
+    print(f"[Toxiproxy] '{scenario}': {latency_ms}±{jitter_ms} ms auf {num_nodes} Proxies")
+
+
 def add_packet_loss(num_nodes: int):
     if TOXIC_PACKET_LOSS_PCT <= 0:
         return

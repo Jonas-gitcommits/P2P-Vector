@@ -7,6 +7,16 @@ EARLY_STOP_THRESHOLD = 44000.0
 EVAL_VARIANT = "both"
 ROUTING_FANOUT = 2
 
+LATENCY_PRESETS = {
+    "none":             (0,   0),
+    "lan":              (1,   1),
+    "same_region":      (5,   2),
+    "same_continent":   (30,  10),
+    "intercontinental": (100, 30),
+    "mobile":           (150, 80),
+}
+LATENCY_SCENARIO = "lan"
+
 TOXIPROXY_ENABLED = True
 TOXIPROXY_HOST = '127.0.0.1'
 TOXIPROXY_API_PORT = 8474
