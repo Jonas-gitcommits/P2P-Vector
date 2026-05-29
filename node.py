@@ -106,7 +106,9 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
         combined_res = list(local_res)
 
         kth_dist = float(local_res[-1][2]) if local_res else request.kth_dist
-        hops_visited = 1
+        my_id = f"127.0.0.1:{self.port}"
+        rpc_count = 1
+        visited_nodes = {my_id}
 
         if request.ttl > 0:
             remote_result = await self.router.distributed_search(
@@ -120,7 +122,8 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
                 early_stop_threshold=request.early_stop_threshold,
             )
             combined_res.extend(remote_result["peers"])
-            hops_visited += remote_result["hops_visited"]
+            rpc_count += remote_result["rpc_count"]
+            visited_nodes |= remote_result["visited_nodes"]
 
         combined_res.sort(key=lambda x: x[2])
 
@@ -141,7 +144,8 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
             p.ip = ip
             p.port = port
             response.distances.append(dist)
-        response.hops_visited = hops_visited
+        response.rpc_count = rpc_count
+        response.visited_nodes.extend(sorted(visited_nodes))
 
         return response
     

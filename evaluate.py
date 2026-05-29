@@ -112,7 +112,7 @@ def run_evaluation():
     fanout_k = max(K * 4, 20)
     es_threshold = EARLY_STOP_THRESHOLD if EARLY_STOP_ENABLED else 0.0
 
-    results = {ttl: {v: {"recalls": [], "latencies": [], "hops": []} for v in variants}
+    results = {ttl: {v: {"recalls": [], "latencies": [], "rpcs": [], "unique": []} for v in variants}
                for ttl in TTL_VALUES}
 
     for run_id in range(NUM_RUNS):
@@ -135,7 +135,8 @@ def run_evaluation():
                         results[ttl][variant]["latencies"].append((time.time() - t0) * 1000)
                         matches = sum(1 for d in response.distances[:K] if d <= gt_max + 1e-5)
                         results[ttl][variant]["recalls"].append(min(matches, K) / K)
-                        results[ttl][variant]["hops"].append(response.hops_visited)
+                        results[ttl][variant]["rpcs"].append(response.rpc_count)
+                        results[ttl][variant]["unique"].append(len(response.visited_nodes))
                     except grpc.RpcError:
                         pass
 
@@ -151,37 +152,43 @@ def run_evaluation():
             data = results[ttl][variant]
             recalls = data["recalls"]
             latencies = data["latencies"]
-            hops = data["hops"]
+            rpcs = data["rpcs"]
+            unique = data["unique"]
             if not recalls:
                 continue
             n = len(recalls)
-            avg_recall = np.mean(recalls) * 100
-            std_recall = np.std(recalls) * 100
-            sem_recall = std_recall / np.sqrt(n)
-            avg_lat    = np.mean(latencies)
-            std_lat    = np.std(latencies)
-            sem_lat    = std_lat / np.sqrt(n)
-            p95_lat    = np.percentile(latencies, 95)
-            avg_hops   = np.mean(hops)
-            p95_hops   = np.percentile(hops, 95)
+            avg_recall  = np.mean(recalls) * 100
+            std_recall  = np.std(recalls) * 100
+            sem_recall  = std_recall / np.sqrt(n)
+            avg_lat     = np.mean(latencies)
+            std_lat     = np.std(latencies)
+            sem_lat     = std_lat / np.sqrt(n)
+            p95_lat     = np.percentile(latencies, 95)
+            avg_rpcs    = np.mean(rpcs)
+            p95_rpcs    = np.percentile(rpcs, 95)
+            avg_unique  = np.mean(unique)
+            p95_unique  = np.percentile(unique, 95)
 
             print(f"TTL={ttl} [{variant}]: "
                   f"{avg_recall:.2f}±{sem_recall:.2f}%  (std={std_recall:.2f}), "
                   f"{avg_lat:.1f}±{sem_lat:.1f} ms  p95={p95_lat:.1f} ms  "
-                  f"hops={avg_hops:.1f} p95={p95_hops:.0f}  (n={n})")
+                  f"rpcs={avg_rpcs:.0f} p95={p95_rpcs:.0f}  "
+                  f"unique={avg_unique:.1f} p95={p95_unique:.0f}  (n={n})")
             csv_rows.append({
                 "ttl": ttl,
                 "variant": variant,
                 "n_queries": n,
-                "recall_mean":     round(avg_recall, 4),
-                "recall_std":      round(std_recall, 4),
-                "recall_sem":      round(sem_recall, 4),
-                "latency_mean_ms": round(avg_lat, 4),
-                "latency_std_ms":  round(std_lat, 4),
-                "latency_sem_ms":  round(sem_lat, 4),
-                "latency_p95_ms":  round(p95_lat, 4),
-                "hops_mean":       round(avg_hops, 2),
-                "hops_p95":        round(p95_hops, 1),
+                "recall_mean":      round(avg_recall, 4),
+                "recall_std":       round(std_recall, 4),
+                "recall_sem":       round(sem_recall, 4),
+                "latency_mean_ms":  round(avg_lat, 4),
+                "latency_std_ms":   round(std_lat, 4),
+                "latency_sem_ms":   round(sem_lat, 4),
+                "latency_p95_ms":   round(p95_lat, 4),
+                "rpc_count_mean":   round(avg_rpcs, 2),
+                "rpc_count_p95":    round(p95_rpcs, 1),
+                "unique_nodes_mean": round(avg_unique, 2),
+                "unique_nodes_p95": round(p95_unique, 1),
             })
 
     if csv_rows:
