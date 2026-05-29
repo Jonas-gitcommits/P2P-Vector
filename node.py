@@ -12,14 +12,15 @@ class LocalGraphState:
     def __init__(self, dimension=DIMENSION, M=HNSW_M):
         self.dimension = dimension
         self.local_index = faiss.IndexHNSWFlat(dimension, M)
-        self.neighbors = {}  
+        self.global_ids = []
+        self.neighbors = {}
 
-    def insert_local(self, vector):
+    def insert_local(self, vector, global_id):
         vec_np = np.array([vector], dtype=np.float32)
         self.local_index.add(vec_np)
+        self.global_ids.append(global_id)
 
     def search_local(self, query_vector, k, my_ip, my_port):
-        """Führt eine lokale FAISS-Suche durch."""
         query_np = np.array([query_vector], dtype=np.float32)
         results = []
 
@@ -28,7 +29,7 @@ class LocalGraphState:
             dist, idx = self.local_index.search(query_np, search_k)
             for d, i in zip(dist[0], idx[0]):
                 if i >= 0 and np.isfinite(d):
-                    results.append((my_ip, my_port, float(d)))
+                    results.append((my_ip, my_port, float(d), self.global_ids[i]))
 
         results.sort(key=lambda x: x[2])
         return results[:k]
@@ -128,21 +129,21 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
 
         seen = set()
         deduped = []
-        for ip, port, dist in combined_res:
-            dkey = round(dist, 5)
-            if dkey in seen:
+        for ip, port, dist, gid in combined_res:
+            if gid in seen:
                 continue
-            seen.add(dkey)
-            deduped.append((ip, port, dist))
+            seen.add(gid)
+            deduped.append((ip, port, dist, gid))
 
         final = deduped[:request.k] if is_entry else deduped[:max(fanout_k, request.k)]
 
         response = p2p_pb2.SearchResponse()
-        for ip, port, dist in final:
+        for ip, port, dist, gid in final:
             p = response.nearest_peers.add()
             p.ip = ip
             p.port = port
             response.distances.append(dist)
+            response.vector_ids.append(gid)
         response.rpc_count = rpc_count
         response.visited_nodes.extend(sorted(visited_nodes))
 
@@ -170,8 +171,8 @@ async def serve(real_port, bootstrap_port=None, node_id=0, proxy_port=None):
                 f"Bitte `python generate_data.py` erneut ausführen."
             )
         my_chunk = dataset[start_idx:start_idx + chunk_size]
-        for vec in my_chunk:
-            local_graph.insert_local(vec.tolist())
+        for j, vec in enumerate(my_chunk):
+            local_graph.insert_local(vec.tolist(), start_idx + j)
 
         print(f"[Node {proxy_port}] ID {node_id}: {len(my_chunk)} Vektoren geladen.")
 
@@ -179,8 +180,8 @@ async def serve(real_port, bootstrap_port=None, node_id=0, proxy_port=None):
             replica_id = (node_id + 1) % NUM_NODES
             replica_start = replica_id * chunk_size
             replica_chunk = dataset[replica_start:replica_start + chunk_size]
-            for vec in replica_chunk:
-                local_graph.insert_local(vec.tolist())
+            for j, vec in enumerate(replica_chunk):
+                local_graph.insert_local(vec.tolist(), replica_start + j)
             print(f"[Node {proxy_port}] Replikat von ID {replica_id}: {len(replica_chunk)} Vektoren geladen.")
     except FileNotFoundError:
         print(f"[Node {proxy_port}] Fehler: dataset.npy nicht gefunden!")

@@ -33,6 +33,7 @@ message SearchResponse {
   repeated float distances = 2;
   int32 rpc_count = 3;
   repeated string visited_nodes = 4;
+  repeated int64 vector_ids = 5;
 }
 
 message PingRequest {

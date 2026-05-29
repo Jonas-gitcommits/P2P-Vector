@@ -14,25 +14,11 @@ from config import (
 _PORT_START = PROXY_PORT_START if TOXIPROXY_ENABLED else REAL_PORT_START
 ALL_NODES = [f"127.0.0.1:{_PORT_START + i}" for i in range(NUM_NODES)]
 
-def build_ground_truth_max_dists(dataset, queries, full_gt):
-    central_index = None
-    gt_max_dists = []
-
-    for qi, q in enumerate(queries):
-        gt_indices_in_subset = [idx for idx in full_gt[qi] if idx < SUBSET_SIZE]
-
-        if len(gt_indices_in_subset) >= K:
-            top_k_vecs = dataset[gt_indices_in_subset[:K]]
-            dists = np.linalg.norm(top_k_vecs - q, axis=1) ** 2
-            gt_max_dists.append(float(dists.max()))
-        else:
-            if central_index is None:
-                central_index = faiss.IndexFlatL2(DIMENSION)
-                central_index.add(dataset)
-            d, _ = central_index.search(np.array([q], dtype=np.float32), K)
-            gt_max_dists.append(float(d[0][-1]))
-
-    return gt_max_dists
+def build_ground_truth_ids(dataset, queries):
+    central_index = faiss.IndexFlatL2(DIMENSION)
+    central_index.add(dataset[:SUBSET_SIZE])
+    _, indices = central_index.search(queries, K)
+    return [set(indices[i].tolist()) for i in range(len(queries))]
 
 
 def get_alive_nodes(nodes):
@@ -85,15 +71,14 @@ def run_evaluation(early_stop_threshold=None, gossip_warmup_s=GOSSIP_WARMUP_S,
     print("Lade Datensatz...")
     dataset = np.load("dataset.npy").astype(np.float32)
     all_queries = np.load("queries.npy").astype(np.float32)
-    full_gt = np.load("ground_truth.npy")
     queries = all_queries[:NUM_QUERIES]
     print(f"  dataset: {dataset.shape}, queries: {queries.shape}")
     print(f"  SUBSET_SIZE={SUBSET_SIZE}, early_stop_threshold={early_stop_threshold}, "
           f"EVAL_VARIANT={EVAL_VARIANT}, scenario={scenario_label}")
 
-    print("Berechne Ground-Truth-Distanzen...")
-    gt_max_dists = build_ground_truth_max_dists(dataset, queries, full_gt)
-    print(f"  Fertig: {len(gt_max_dists)} Distanzen.\n")
+    print("Berechne Ground-Truth-IDs...")
+    true_ids = build_ground_truth_ids(dataset, queries)
+    print(f"  Fertig: {len(true_ids)} Query-Referenzmengen.\n")
 
     if gossip_warmup_s > 0:
         print(f"Warte {gossip_warmup_s}s für Gossip-Konvergenz...")
@@ -125,7 +110,6 @@ def run_evaluation(early_stop_threshold=None, gossip_warmup_s=GOSSIP_WARMUP_S,
 
                 for i, query_vector in enumerate(queries):
                     entry_node = entry_nodes[i]
-                    gt_max = gt_max_dists[i]
                     request = make_request(query_vector, K, ttl, variant, fanout_k,
                                           early_stop_threshold)
 
@@ -133,8 +117,8 @@ def run_evaluation(early_stop_threshold=None, gossip_warmup_s=GOSSIP_WARMUP_S,
                         t0 = time.time()
                         response = stubs[entry_node].SearchSimilar(request, timeout=10.0)
                         results[ttl][variant]["latencies"].append((time.time() - t0) * 1000)
-                        matches = sum(1 for d in response.distances[:K] if d <= gt_max + 1e-5)
-                        results[ttl][variant]["recalls"].append(min(matches, K) / K)
+                        matches = len(set(response.vector_ids[:K]) & true_ids[i])
+                        results[ttl][variant]["recalls"].append(matches / K)
                         results[ttl][variant]["rpcs"].append(response.rpc_count)
                         results[ttl][variant]["unique"].append(len(response.visited_nodes))
                     except grpc.RpcError:

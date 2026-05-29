@@ -40,7 +40,12 @@ class DistributedRouter:
         try:
             response = await stub.SearchSimilar(request, timeout=RPC_TIMEOUT_S)
             return {
-                "peers": [(p.ip, p.port, d) for p, d in zip(response.nearest_peers, response.distances)],
+                "peers": [
+                    (p.ip, p.port, d, gid)
+                    for p, d, gid in zip(
+                        response.nearest_peers, response.distances, response.vector_ids
+                    )
+                ],
                 "rpc_count": response.rpc_count,
                 "visited_nodes": set(response.visited_nodes),
             }
@@ -93,11 +98,10 @@ class DistributedRouter:
         combined_results.sort(key=lambda x: x[2])
         unique_results = []
         seen = set()
-        for ip, port, dist in combined_results:
-            key = round(dist, 5)
-            if key not in seen:
-                seen.add(key)
-                unique_results.append((ip, port, dist))
+        for ip, port, dist, gid in combined_results:
+            if gid not in seen:
+                seen.add(gid)
+                unique_results.append((ip, port, dist, gid))
 
         return {"peers": unique_results[:max(fanout_k, k)], "rpc_count": total_rpcs, "visited_nodes": all_visited}
 
@@ -115,7 +119,7 @@ class DistributedRouter:
                 results = await self.ask_neighbor_for_vectors(
                     target, my_vector, k=2, ttl=1, visited_peers=[my_target]
                 )
-                for ip, port, _ in results["peers"]:
+                for ip, port, _dist, _gid in results["peers"]:
                     if ip == self.my_ip and port == self.my_port:
                         continue
                     local_graph.add_neighbor_edge(ip, port, my_vector)
