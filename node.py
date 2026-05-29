@@ -106,9 +106,10 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
         combined_res = list(local_res)
 
         kth_dist = float(local_res[-1][2]) if local_res else request.kth_dist
+        hops_visited = 1
 
         if request.ttl > 0:
-            remote_res = await self.router.distributed_search(
+            remote_result = await self.router.distributed_search(
                 self.local_graph,
                 query_vec,
                 request.k,
@@ -118,7 +119,8 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
                 fanout_k=fanout_k,
                 early_stop_threshold=request.early_stop_threshold,
             )
-            combined_res.extend(remote_res)
+            combined_res.extend(remote_result["peers"])
+            hops_visited += remote_result["hops_visited"]
 
         combined_res.sort(key=lambda x: x[2])
 
@@ -139,7 +141,8 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
             p.ip = ip
             p.port = port
             response.distances.append(dist)
-            
+        response.hops_visited = hops_visited
+
         return response
     
     async def Ping(self, request, context):

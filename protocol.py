@@ -38,9 +38,12 @@ class DistributedRouter:
 
         try:
             response = await stub.SearchSimilar(request, timeout=1.5)
-            return [(p.ip, p.port, d) for p, d in zip(response.nearest_peers, response.distances)]
+            return {
+                "peers": [(p.ip, p.port, d) for p, d in zip(response.nearest_peers, response.distances)],
+                "hops_visited": response.hops_visited,
+            }
         except grpc.RpcError:
-            return []
+            return {"peers": [], "hops_visited": 0}
         
     async def distributed_search(self, local_graph, query_vector, k, ttl, visited_peers,
                                  kth_dist=0.0, fanout_k=0, early_stop_threshold=0.0):
@@ -53,17 +56,17 @@ class DistributedRouter:
             visited_peers.append(my_target)
 
         if ttl <= 0:
-            return []
+            return {"peers": [], "hops_visited": 0}
 
         from config import ROUTING_FANOUT
         if early_stop_threshold > 0 and kth_dist > 0 and kth_dist <= early_stop_threshold:
-            return []
+            return {"peers": [], "hops_visited": 0}
 
         decision = local_graph.evaluate_next_hop(
             query_vector, visited_peers, fanout=ROUTING_FANOUT
         )
         if decision["action"] == "stop" or not decision["targets"]:
-            return []
+            return {"peers": [], "hops_visited": 0}
 
         targets = decision["targets"][:ROUTING_FANOUT]
 
@@ -78,8 +81,10 @@ class DistributedRouter:
         results = await asyncio.gather(*tasks)
 
         combined_results = []
-        for res_list in results:
-            combined_results.extend(res_list)
+        total_child_hops = 0
+        for r in results:
+            combined_results.extend(r["peers"])
+            total_child_hops += r["hops_visited"]
 
         combined_results.sort(key=lambda x: x[2])
         unique_results = []
@@ -90,7 +95,7 @@ class DistributedRouter:
                 seen.add(key)
                 unique_results.append((ip, port, dist))
 
-        return unique_results[:max(fanout_k, k)]
+        return {"peers": unique_results[:max(fanout_k, k)], "hops_visited": total_child_hops}
 
     async def start_gossip_loop(self, local_graph):
         while True:
@@ -106,7 +111,7 @@ class DistributedRouter:
                 results = await self.ask_neighbor_for_vectors(
                     target, my_vector, k=2, ttl=1, visited_peers=[my_target]
                 )
-                for ip, port, _ in results:
+                for ip, port, _ in results["peers"]:
                     if ip == self.my_ip and port == self.my_port:
                         continue
                     local_graph.add_neighbor_edge(ip, port, my_vector)

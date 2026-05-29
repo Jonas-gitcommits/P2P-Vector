@@ -31,6 +31,7 @@ message SearchRequest {
 message SearchResponse {
   repeated Peer nearest_peers = 1;
   repeated float distances = 2;
+  int32 hops_visited = 3;
 }
 
 message PingRequest {

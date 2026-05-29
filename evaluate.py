@@ -112,7 +112,7 @@ def run_evaluation():
     fanout_k = max(K * 4, 20)
     es_threshold = EARLY_STOP_THRESHOLD if EARLY_STOP_ENABLED else 0.0
 
-    results = {ttl: {v: {"recalls": [], "latencies": []} for v in variants}
+    results = {ttl: {v: {"recalls": [], "latencies": [], "hops": []} for v in variants}
                for ttl in TTL_VALUES}
 
     for run_id in range(NUM_RUNS):
@@ -135,6 +135,7 @@ def run_evaluation():
                         results[ttl][variant]["latencies"].append((time.time() - t0) * 1000)
                         matches = sum(1 for d in response.distances[:K] if d <= gt_max + 1e-5)
                         results[ttl][variant]["recalls"].append(min(matches, K) / K)
+                        results[ttl][variant]["hops"].append(response.hops_visited)
                     except grpc.RpcError:
                         pass
 
@@ -150,6 +151,7 @@ def run_evaluation():
             data = results[ttl][variant]
             recalls = data["recalls"]
             latencies = data["latencies"]
+            hops = data["hops"]
             if not recalls:
                 continue
             n = len(recalls)
@@ -160,10 +162,13 @@ def run_evaluation():
             std_lat    = np.std(latencies)
             sem_lat    = std_lat / np.sqrt(n)
             p95_lat    = np.percentile(latencies, 95)
+            avg_hops   = np.mean(hops)
+            p95_hops   = np.percentile(hops, 95)
 
             print(f"TTL={ttl} [{variant}]: "
                   f"{avg_recall:.2f}±{sem_recall:.2f}%  (std={std_recall:.2f}), "
-                  f"{avg_lat:.1f}±{sem_lat:.1f} ms  p95={p95_lat:.1f} ms  (n={n})")
+                  f"{avg_lat:.1f}±{sem_lat:.1f} ms  p95={p95_lat:.1f} ms  "
+                  f"hops={avg_hops:.1f} p95={p95_hops:.0f}  (n={n})")
             csv_rows.append({
                 "ttl": ttl,
                 "variant": variant,
@@ -175,6 +180,8 @@ def run_evaluation():
                 "latency_std_ms":  round(std_lat, 4),
                 "latency_sem_ms":  round(sem_lat, 4),
                 "latency_p95_ms":  round(p95_lat, 4),
+                "hops_mean":       round(avg_hops, 2),
+                "hops_p95":        round(p95_hops, 1),
             })
 
     if csv_rows:
