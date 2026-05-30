@@ -35,6 +35,22 @@ class LocalGraphState:
         results.sort(key=lambda x: x[2])
         return results[:k]
 
+    async def compute_summary(self, R=8):
+        n = self.local_index.ntotal
+        if n == 0:
+            return b"", 0
+
+        def _run():
+            vecs = self.local_index.reconstruct_n(0, n).astype(np.float32)
+            if n < R:
+                centroid = vecs.mean(axis=0, keepdims=True).astype(np.float32)
+                return centroid.tobytes(), 1
+            kmeans = faiss.Kmeans(self.dimension, R, niter=20, verbose=False)
+            kmeans.train(vecs)
+            return kmeans.centroids.astype(np.float32).tobytes(), R
+
+        return await asyncio.to_thread(_run)
+
     async def get_my_latest_vector(self):
         if self.local_index.ntotal == 0:
             return [0.0] * self.dimension
@@ -152,9 +168,12 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
         return response
     
     async def Ping(self, request, context):
+        summary_bytes, summary_count = await self.local_graph.compute_summary()
         return p2p_pb2.PingResponse(
-            alive=True, 
-            neighbor_count=len(self.local_graph.neighbors)
+            alive=True,
+            neighbor_count=len(self.local_graph.neighbors),
+            summary=summary_bytes,
+            summary_count=summary_count,
         )
 
 async def serve(real_port, bootstrap_port=None, node_id=0, proxy_port=None, seed=0):

@@ -43,4 +43,6 @@ message PingRequest {
 message PingResponse {
   bool alive = 1;
   int32 neighbor_count = 2;
+  bytes summary = 3;
+  int32 summary_count = 4;
 }
