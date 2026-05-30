@@ -9,11 +9,12 @@ import sys
 from config import MAX_NEIGHBORS, HNSW_M, DIMENSION
 
 class LocalGraphState:
-    def __init__(self, dimension=DIMENSION, M=HNSW_M):
+    def __init__(self, dimension=DIMENSION, M=HNSW_M, rng=None):
         self.dimension = dimension
         self.local_index = faiss.IndexHNSWFlat(dimension, M)
         self.global_ids = []
         self.neighbors = {}
+        self.rng = rng or random.Random()
 
     def insert_local(self, vector, global_id):
         vec_np = np.array([vector], dtype=np.float32)
@@ -37,7 +38,7 @@ class LocalGraphState:
     def get_my_latest_vector(self):
         if self.local_index.ntotal == 0:
             return [0.0] * self.dimension
-        idx = random.randint(0, self.local_index.ntotal - 1)
+        idx = self.rng.randint(0, self.local_index.ntotal - 1)
         return self.local_index.reconstruct(idx).tolist()
 
     def evaluate_next_hop(self, query_vector, visited_peers, best_dist_so_far=None, fanout=2):
@@ -77,7 +78,7 @@ class LocalGraphState:
             neighbor_distances.sort(key=lambda x: x[0])
             best_neighbors = neighbor_distances[:6]
             remaining = neighbor_distances[6:]
-            random_picks = random.sample(remaining, min(2, len(remaining)))
+            random_picks = self.rng.sample(remaining, min(2, len(remaining)))
  
             self.neighbors = {}
             for _, t, v_list in best_neighbors + random_picks:
@@ -155,9 +156,10 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
             neighbor_count=len(self.local_graph.neighbors)
         )
 
-async def serve(real_port, bootstrap_port=None, node_id=0, proxy_port=None):
+async def serve(real_port, bootstrap_port=None, node_id=0, proxy_port=None, seed=0):
     proxy_port = proxy_port or real_port
-    local_graph = LocalGraphState()
+    rng = random.Random(seed)
+    local_graph = LocalGraphState(rng=rng)
 
     try:
         from config import VECTORS_PER_NODE, NUM_NODES, REPLICATION
@@ -190,7 +192,7 @@ async def serve(real_port, bootstrap_port=None, node_id=0, proxy_port=None):
         local_graph.add_neighbor_edge("127.0.0.1", int(bootstrap_port), [0.0] * 128)
 
     from protocol import DistributedRouter
-    router = DistributedRouter("127.0.0.1", proxy_port)
+    router = DistributedRouter("127.0.0.1", proxy_port, rng=rng)
 
     asyncio.create_task(router.health_check_loop(local_graph))
     asyncio.create_task(router.start_gossip_loop(local_graph))
@@ -211,5 +213,6 @@ if __name__ == '__main__':
     b = sys.argv[2] if len(sys.argv) > 2 else None
     n_id = int(sys.argv[3]) if len(sys.argv) > 3 else 0
     proxy_p = int(sys.argv[4]) if len(sys.argv) > 4 else real_p
+    seed = int(sys.argv[5]) if len(sys.argv) > 5 else 0
 
-    asyncio.run(serve(real_p, b, n_id, proxy_p))
+    asyncio.run(serve(real_p, b, n_id, proxy_p, seed))

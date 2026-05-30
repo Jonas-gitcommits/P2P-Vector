@@ -10,10 +10,11 @@ from config import (
 )
 
 class DistributedRouter:
-    def __init__(self, my_ip, my_port):
+    def __init__(self, my_ip, my_port, rng=None):
         self.my_ip = my_ip
         self.my_port = my_port
         self._channel_pool = {}
+        self.rng = rng or random.Random()
 
     def _get_channel(self, target: str):
         if target not in self._channel_pool:
@@ -119,7 +120,7 @@ class DistributedRouter:
             if not local_graph.neighbors:
                 continue
 
-            target = random.choice(list(local_graph.neighbors.keys()))
+            target = self.rng.choice(list(local_graph.neighbors.keys()))
             my_vector = local_graph.get_my_latest_vector()
             my_target = f"{self.my_ip}:{self.my_port}"
 
