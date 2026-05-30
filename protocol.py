@@ -121,7 +121,7 @@ class DistributedRouter:
                 continue
 
             target = self.rng.choice(list(local_graph.neighbors.keys()))
-            my_vector = local_graph.get_my_latest_vector()
+            my_vector = await local_graph.get_my_latest_vector()
             my_target = f"{self.my_ip}:{self.my_port}"
 
             try:
@@ -131,7 +131,7 @@ class DistributedRouter:
                 for ip, port, _dist, _gid in results["peers"]:
                     if ip == self.my_ip and port == self.my_port:
                         continue
-                    local_graph.add_neighbor_edge(ip, port, my_vector)
+                    await local_graph.add_neighbor_edge(ip, port, my_vector)
             except Exception:
                 pass
     
