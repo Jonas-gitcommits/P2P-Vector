@@ -14,6 +14,10 @@ from config import (
 _PORT_START = PROXY_PORT_START if TOXIPROXY_ENABLED else REAL_PORT_START
 ALL_NODES = [f"127.0.0.1:{_PORT_START + i}" for i in range(NUM_NODES)]
 
+from scipy.stats import t
+def _t_crit(n):
+    return float(t.ppf(0.975, n - 1))
+
 def build_ground_truth_ids(dataset, queries):
     central_index = faiss.IndexFlatL2(DIMENSION)
     central_index.add(dataset[:SUBSET_SIZE])
@@ -71,14 +75,13 @@ def run_evaluation(early_stop_threshold=None, gossip_warmup_s=GOSSIP_WARMUP_S,
     print("Lade Datensatz...")
     dataset = np.load("dataset.npy").astype(np.float32)
     all_queries = np.load("queries.npy").astype(np.float32)
-    queries = all_queries[:NUM_QUERIES]
-    print(f"  dataset: {dataset.shape}, queries: {queries.shape}")
+    print(f"  dataset: {dataset.shape}, queries verfügbar: {all_queries.shape}")
     print(f"  SUBSET_SIZE={SUBSET_SIZE}, early_stop_threshold={early_stop_threshold}, "
           f"EVAL_VARIANT={EVAL_VARIANT}, scenario={scenario_label}")
 
-    print("Berechne Ground-Truth-IDs...")
-    true_ids = build_ground_truth_ids(dataset, queries)
-    print(f"  Fertig: {len(true_ids)} Query-Referenzmengen.\n")
+    print("Berechne Ground-Truth-IDs (alle Queries)...")
+    true_ids_all = build_ground_truth_ids(dataset, all_queries)
+    print(f"  Fertig: {len(true_ids_all)} Referenzmengen.\n")
 
     if gossip_warmup_s > 0:
         print(f"Warte {gossip_warmup_s}s für Gossip-Konvergenz...")
@@ -96,33 +99,46 @@ def run_evaluation(early_stop_threshold=None, gossip_warmup_s=GOSSIP_WARMUP_S,
     variants = resolve_variants(EVAL_VARIANT)
     fanout_k = max(K * 4, 20)
 
-    results = {ttl: {v: {"recalls": [], "latencies": [], "rpcs": [], "unique": []} for v in variants}
-               for ttl in TTL_VALUES}
+    run_data = {ttl: {v: {"recalls": [], "latencies": [], "p95_lats": [],
+                           "rpcs": [], "unique": []}
+                      for v in variants}
+                for ttl in TTL_VALUES}
 
     for run_id in range(NUM_RUNS):
-        random.seed(42 + run_id)
-        entry_nodes = [random.choice(alive_nodes) for _ in queries]
+        rng = random.Random(42 + run_id)
+        idx = rng.sample(range(len(all_queries)), NUM_QUERIES)
+        run_queries = all_queries[idx]
+        run_true_ids = [true_ids_all[j] for j in idx]
+        entry_nodes = [rng.choice(alive_nodes) for _ in range(NUM_QUERIES)]
 
         for ttl in TTL_VALUES:
             for variant in variants:
                 print(f"Run {run_id + 1}/{NUM_RUNS} | TTL={ttl} | variant={variant} "
                       f"({NUM_QUERIES} Queries)...")
 
-                for i, query_vector in enumerate(queries):
-                    entry_node = entry_nodes[i]
+                q_recalls, q_lats, q_rpcs, q_unique = [], [], [], []
+
+                for i, query_vector in enumerate(run_queries):
                     request = make_request(query_vector, K, ttl, variant, fanout_k,
                                           early_stop_threshold)
-
                     try:
                         t0 = time.time()
-                        response = stubs[entry_node].SearchSimilar(request, timeout=10.0)
-                        results[ttl][variant]["latencies"].append((time.time() - t0) * 1000)
-                        matches = len(set(response.vector_ids[:K]) & true_ids[i])
-                        results[ttl][variant]["recalls"].append(matches / K)
-                        results[ttl][variant]["rpcs"].append(response.rpc_count)
-                        results[ttl][variant]["unique"].append(len(response.visited_nodes))
+                        response = stubs[entry_nodes[i]].SearchSimilar(request, timeout=10.0)
+                        q_lats.append((time.time() - t0) * 1000)
+                        matches = len(set(response.vector_ids[:K]) & run_true_ids[i])
+                        q_recalls.append(matches / K)
+                        q_rpcs.append(response.rpc_count)
+                        q_unique.append(len(response.visited_nodes))
                     except grpc.RpcError:
                         pass
+
+                if q_recalls:
+                    rd = run_data[ttl][variant]
+                    rd["recalls"].append(np.mean(q_recalls))
+                    rd["latencies"].append(np.mean(q_lats))
+                    rd["p95_lats"].append(np.percentile(q_lats, 95))
+                    rd["rpcs"].append(np.mean(q_rpcs))
+                    rd["unique"].append(np.mean(q_unique))
 
     for ch in channels.values():
         ch.close()
@@ -132,47 +148,50 @@ def run_evaluation(early_stop_threshold=None, gossip_warmup_s=GOSSIP_WARMUP_S,
 
     for ttl in TTL_VALUES:
         for variant in variants:
-            data = results[ttl][variant]
-            recalls = data["recalls"]
-            latencies = data["latencies"]
-            rpcs = data["rpcs"]
-            unique = data["unique"]
-            if not recalls:
+            rd = run_data[ttl][variant]
+            run_recalls = rd["recalls"]
+            if not run_recalls:
                 continue
-            n = len(recalls)
-            avg_recall  = np.mean(recalls) * 100
-            std_recall  = np.std(recalls) * 100
-            sem_recall  = std_recall / np.sqrt(n)
-            avg_lat     = np.mean(latencies)
-            std_lat     = np.std(latencies)
-            sem_lat     = std_lat / np.sqrt(n)
-            p95_lat     = np.percentile(latencies, 95)
-            avg_rpcs    = np.mean(rpcs)
-            p95_rpcs    = np.percentile(rpcs, 95)
-            avg_unique  = np.mean(unique)
-            p95_unique  = np.percentile(unique, 95)
+            n = len(run_recalls)
+            tc = _t_crit(n)
+
+            avg_recall = np.mean(run_recalls) * 100
+            std_recall = np.std(run_recalls, ddof=1) * 100
+            sem_recall = std_recall / np.sqrt(n)
+            ci_lo = avg_recall - tc * sem_recall
+            ci_hi = avg_recall + tc * sem_recall
+
+            avg_lat = np.mean(rd["latencies"])
+            std_lat = np.std(rd["latencies"], ddof=1)
+            sem_lat = std_lat / np.sqrt(n)
+            lat_ci_lo = avg_lat - tc * sem_lat
+            lat_ci_hi = avg_lat + tc * sem_lat
+            avg_p95_lat = np.mean(rd["p95_lats"])
+
+            avg_rpcs   = np.mean(rd["rpcs"])
+            avg_unique = np.mean(rd["unique"])
 
             print(f"TTL={ttl} [{variant}]: "
-                  f"{avg_recall:.2f}±{sem_recall:.2f}%  (std={std_recall:.2f}), "
-                  f"{avg_lat:.1f}±{sem_lat:.1f} ms  p95={p95_lat:.1f} ms  "
-                  f"rpcs={avg_rpcs:.0f} p95={p95_rpcs:.0f}  "
-                  f"unique={avg_unique:.1f} p95={p95_unique:.0f}  (n={n})")
+                  f"{avg_recall:.2f}% [{ci_lo:.2f}, {ci_hi:.2f}] (std={std_recall:.2f}), "
+                  f"{avg_lat:.1f} [{lat_ci_lo:.1f}, {lat_ci_hi:.1f}] ms  "
+                  f"p95={avg_p95_lat:.1f} ms  "
+                  f"rpcs={avg_rpcs:.0f}  unique={avg_unique:.1f}  (n={n} Läufe)")
             csv_rows.append({
-                "scenario": scenario_label,
-                "ttl": ttl,
-                "variant": variant,
-                "n_queries": n,
+                "scenario":          scenario_label,
+                "ttl":               ttl,
+                "variant":           variant,
+                "n_runs":            n,
                 "recall_mean":       round(avg_recall, 4),
                 "recall_std":        round(std_recall, 4),
-                "recall_sem":        round(sem_recall, 4),
+                "recall_ci95_low":   round(ci_lo, 4),
+                "recall_ci95_high":  round(ci_hi, 4),
                 "latency_mean_ms":   round(avg_lat, 4),
                 "latency_std_ms":    round(std_lat, 4),
-                "latency_sem_ms":    round(sem_lat, 4),
-                "latency_p95_ms":    round(p95_lat, 4),
+                "latency_ci95_low":  round(lat_ci_lo, 4),
+                "latency_ci95_high": round(lat_ci_hi, 4),
+                "latency_p95_ms":    round(avg_p95_lat, 4),
                 "rpc_count_mean":    round(avg_rpcs, 2),
-                "rpc_count_p95":     round(p95_rpcs, 1),
                 "unique_nodes_mean": round(avg_unique, 2),
-                "unique_nodes_p95":  round(p95_unique, 1),
             })
 
     return csv_rows
