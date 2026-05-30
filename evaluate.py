@@ -86,6 +86,16 @@ def run_evaluation(early_stop_threshold=None, gossip_warmup_s=GOSSIP_WARMUP_S,
     channels = {n: grpc.insecure_channel(n) for n in alive_nodes}
     stubs = {n: p2p_pb2_grpc.VectorStoreStub(channels[n]) for n in alive_nodes}
 
+    nb_counts = []
+    for stub in stubs.values():
+        try:
+            nb_counts.append(stub.Ping(p2p_pb2.PingRequest(), timeout=1.0).neighbor_count)
+        except grpc.RpcError:
+            pass
+    if nb_counts:
+        print(f"Ø Nachbarn pro Knoten: {np.mean(nb_counts):.1f}  "
+              f"(min={min(nb_counts)}, max={max(nb_counts)})")
+
     fanout_k = max(K * 4, 20)
 
     run_data = {ttl: {"recalls": [], "latencies": [], "p95_lats": [],

@@ -20,7 +20,7 @@ NUM_QUERIES = 1000
 NUM_RUNS = 5
 K = 3
 TTL_VALUES = [2, 4, 6, 8, 10]
-GOSSIP_WARMUP_S = 10
+GOSSIP_WARMUP_S = 30
 
 LATENCY_PRESETS = {
     "none":             (0,   0),

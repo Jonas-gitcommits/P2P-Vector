@@ -121,34 +121,45 @@ class DistributedRouter:
                 continue
 
             target = self.rng.choice(list(local_graph.neighbors.keys()))
-            my_vector = await local_graph.get_my_latest_vector()
             my_target = f"{self.my_ip}:{self.my_port}"
+
+            probe = None
+            for summary in local_graph.neighbors.values():
+                if summary is not None:
+                    probe = summary[self.rng.randint(0, len(summary) - 1)].tolist()
+                    break
+            if probe is None:
+                probe = [0.0] * local_graph.dimension
 
             try:
                 results = await self.ask_neighbor_for_vectors(
-                    target, my_vector, k=2, ttl=1, visited_peers=[my_target]
+                    target, probe, k=2, ttl=1, visited_peers=[my_target]
                 )
                 for ip, port, _dist, _gid in results["peers"]:
                     if ip == self.my_ip and port == self.my_port:
                         continue
-                    await local_graph.add_neighbor_edge(ip, port, my_vector)
+                    local_graph.add_neighbor_edge(ip, port)
             except Exception:
                 pass
-    
+
     async def health_check_loop(self, local_graph):
         while True:
             await asyncio.sleep(HEALTH_CHECK_INTERVAL_S)
             dead_targets = []
-            
+
             for target in list(local_graph.neighbors.keys()):
                 channel = self._get_channel(target)
                 stub = p2p_pb2_grpc.VectorStoreStub(channel)
-                
+
                 try:
-                    await stub.Ping(p2p_pb2.PingRequest(), timeout=PING_TIMEOUT_S)
+                    response = await stub.Ping(p2p_pb2.PingRequest(), timeout=PING_TIMEOUT_S)
+                    if response.summary_count > 0 and response.summary:
+                        local_graph.neighbors[target] = np.frombuffer(
+                            response.summary, dtype=np.float32
+                        ).reshape(response.summary_count, -1).copy()
                 except grpc.RpcError:
                     dead_targets.append(target)
-            
+
             for target in dead_targets:
                 if target in local_graph.neighbors:
                     del local_graph.neighbors[target]

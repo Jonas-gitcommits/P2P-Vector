@@ -60,11 +60,14 @@ class LocalGraphState:
     def evaluate_next_hop(self, query_vector, visited_peers, best_dist_so_far=None, fanout=2):
         query_np = np.array(query_vector, dtype=np.float32)
         valid_neighbors = []
-        for target, vectors in self.neighbors.items():
+        for target, summary in self.neighbors.items():
             if target in visited_peers:
                 continue
-            vec_np = np.array(vectors[-1], dtype=np.float32)
-            dist = float(np.sum((query_np - vec_np) ** 2))
+            if summary is None:
+                dist = float("inf")
+            else:
+                diffs = summary - query_np      
+                dist = float(np.min(np.sum(diffs ** 2, axis=1)))
             valid_neighbors.append((target, dist))
 
         if not valid_neighbors:
@@ -74,32 +77,10 @@ class LocalGraphState:
         best_targets = [n[0] for n in valid_neighbors[:fanout]]
         return {"action": "hop", "targets": best_targets}
 
-    async def add_neighbor_edge(self, ip, port, vector):
+    def add_neighbor_edge(self, ip, port):
         target = f"{ip}:{port}"
         if target not in self.neighbors:
-            self.neighbors[target] = []
-        self.neighbors[target].append(vector)
-
-        if len(self.neighbors) > MAX_NEIGHBORS:
-            snapshot = list(self.neighbors.items())
-            neighbor_distances = []
-            for n_target, n_vectors in snapshot:
-                vec_np = np.array([n_vectors[-1]], dtype=np.float32)
-                if self.local_index.ntotal > 0:
-                    dists, _ = await asyncio.to_thread(self.local_index.search, vec_np, 1)
-                    dist = float(dists[0][0])
-                else:
-                    dist = float("inf")
-                neighbor_distances.append((dist, n_target, n_vectors))
-
-            neighbor_distances.sort(key=lambda x: x[0])
-            best_neighbors = neighbor_distances[:6]
-            remaining = neighbor_distances[6:]
-            random_picks = self.rng.sample(remaining, min(2, len(remaining)))
-
-            self.neighbors = {}
-            for _, t, v_list in best_neighbors + random_picks:
-                self.neighbors[t] = v_list
+            self.neighbors[target] = None  
 
 
 class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
@@ -111,10 +92,10 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
     async def SearchSimilar(self, request, context):
         query_vec = np.frombuffer(request.query.values, dtype=np.float32).tolist()
         visited = list(request.visited_peers)
-        
+
         if (request.sender_port > 0 and request.sender_port != 9999
                 and not (request.sender_ip == "127.0.0.1" and request.sender_port == self.port)):
-            await self.local_graph.add_neighbor_edge(request.sender_ip, request.sender_port, query_vec)
+            self.local_graph.add_neighbor_edge(request.sender_ip, request.sender_port)
 
         is_entry = (request.sender_port == 9999)
         fanout_k = request.fanout_k if request.fanout_k > 0 else max(request.k * 4, 20)
@@ -209,7 +190,7 @@ async def serve(real_port, bootstrap_port=None, node_id=0, proxy_port=None, seed
         print(f"[Node {proxy_port}] Fehler: dataset.npy nicht gefunden!")
 
     if bootstrap_port and bootstrap_port != "None":
-        await local_graph.add_neighbor_edge("127.0.0.1", int(bootstrap_port), [0.0] * 128)
+        local_graph.add_neighbor_edge("127.0.0.1", int(bootstrap_port))
 
     from protocol import DistributedRouter
     router = DistributedRouter("127.0.0.1", proxy_port, rng=rng)
