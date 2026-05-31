@@ -1,17 +1,13 @@
 import numpy as np
 import os
 import struct
-from config import SUBSET_SIZE
+import faiss
+from config import SUBSET_SIZE, NUM_NODES, DIMENSION
 
 SIFT_DIR = "sift_data/sift"
 
 
 def read_fvecs(path, max_count=None):
-    """Liest .fvecs-Format (Standard für SIFT/GIST-Benchmarks).
-
-    Format pro Vektor: 4-Byte int32 dim, dann dim × 4-Byte float32.
-    Hier: http://corpus-texmex.irisa.fr/
-    """
     vecs = []
     with open(path, "rb") as f:
         while True:
@@ -27,7 +23,6 @@ def read_fvecs(path, max_count=None):
 
 
 def read_ivecs(path, max_count=None):
-    """Liest .ivecs-Format (für Ground-Truth)."""
     vecs = []
     with open(path, "rb") as f:
         while True:
@@ -40,6 +35,30 @@ def read_ivecs(path, max_count=None):
             if max_count is not None and len(vecs) >= max_count:
                 break
     return np.array(vecs, dtype=np.int32)
+
+
+def _compute_partition(base):
+    print(f"Berechne Cluster-Partitionierung ({NUM_NODES} Cluster, niter=50)...")
+    kmeans = faiss.Kmeans(DIMENSION, NUM_NODES, niter=50, seed=42, verbose=False)
+    kmeans.train(base)
+
+    _, assignments = kmeans.index.search(base, 1)
+    partition = assignments.flatten().astype(np.int32)
+
+    counts = [int(np.sum(partition == i)) for i in range(NUM_NODES)]
+    assert sum(counts) == SUBSET_SIZE, f"Summe {sum(counts)} != SUBSET_SIZE {SUBSET_SIZE}"
+    print(f"  Cluster-Größen: {counts}  (Summe={sum(counts)} = SUBSET_SIZE)")
+
+    centroids = kmeans.centroids
+    dists = []
+    for i in range(NUM_NODES):
+        for j in range(i + 1, NUM_NODES):
+            d = float(np.sqrt(np.sum((centroids[i] - centroids[j]) ** 2)))
+            dists.append(d)
+    print(f"  Paarweise Zentroid-Distanzen (L2):  "
+          f"min={min(dists):.1f}  Ø={np.mean(dists):.1f}  max={max(dists):.1f}")
+
+    return partition
 
 
 def generate_dataset():
@@ -65,6 +84,10 @@ def generate_dataset():
     print(f"  dataset.npy:      {base.shape}")
     print(f"  queries.npy:      {queries.shape}")
     print(f"  ground_truth.npy: {gt.shape}")
+
+    partition = _compute_partition(base)
+    np.save("partition.npy", partition)
+    print(f"  partition.npy:    {partition.shape}  (dtype={partition.dtype})")
 
 
 if __name__ == "__main__":

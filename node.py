@@ -163,31 +163,46 @@ async def serve(real_port, bootstrap_port=None, node_id=0, proxy_port=None, seed
     local_graph = LocalGraphState(rng=rng)
 
     try:
-        from config import VECTORS_PER_NODE, NUM_NODES, REPLICATION
+        from config import VECTORS_PER_NODE, NUM_NODES, REPLICATION, PLACEMENT
         dataset = np.load("dataset.npy")
-        chunk_size = VECTORS_PER_NODE
 
-        start_idx = node_id * chunk_size
-        if start_idx + chunk_size > len(dataset):
-            raise RuntimeError(
-                f"dataset.npy zu klein!"
-                f"Bitte `python generate_data.py` erneut ausführen."
-            )
-        my_chunk = dataset[start_idx:start_idx + chunk_size]
-        for j, vec in enumerate(my_chunk):
-            await local_graph.insert_local(vec.tolist(), start_idx + j)
+        if PLACEMENT == 'clustered':
+            partition = np.load("partition.npy")
+            my_ids = np.where(partition == node_id)[0]
+            for gid in my_ids:
+                await local_graph.insert_local(dataset[gid].tolist(), int(gid))
+            print(f"[Node {proxy_port}] ID {node_id}: {len(my_ids)} Vektoren geladen (clustered).")
 
-        print(f"[Node {proxy_port}] ID {node_id}: {len(my_chunk)} Vektoren geladen.")
+            if REPLICATION:
+                replica_id = (node_id + 1) % NUM_NODES
+                replica_ids = np.where(partition == replica_id)[0]
+                for gid in replica_ids:
+                    await local_graph.insert_local(dataset[gid].tolist(), int(gid))
+                print(f"[Node {proxy_port}] Replikat von ID {replica_id}: "
+                      f"{len(replica_ids)} Vektoren geladen.")
+        else:
+            chunk_size = VECTORS_PER_NODE
+            start_idx = node_id * chunk_size
+            if start_idx + chunk_size > len(dataset):
+                raise RuntimeError(
+                    "dataset.npy zu klein! "
+                    "Bitte `python generate_data.py` erneut ausführen."
+                )
+            my_chunk = dataset[start_idx:start_idx + chunk_size]
+            for j, vec in enumerate(my_chunk):
+                await local_graph.insert_local(vec.tolist(), start_idx + j)
+            print(f"[Node {proxy_port}] ID {node_id}: {len(my_chunk)} Vektoren geladen (contiguous).")
 
-        if REPLICATION:
-            replica_id = (node_id + 1) % NUM_NODES
-            replica_start = replica_id * chunk_size
-            replica_chunk = dataset[replica_start:replica_start + chunk_size]
-            for j, vec in enumerate(replica_chunk):
-                await local_graph.insert_local(vec.tolist(), replica_start + j)
-            print(f"[Node {proxy_port}] Replikat von ID {replica_id}: {len(replica_chunk)} Vektoren geladen.")
-    except FileNotFoundError:
-        print(f"[Node {proxy_port}] Fehler: dataset.npy nicht gefunden!")
+            if REPLICATION:
+                replica_id = (node_id + 1) % NUM_NODES
+                replica_start = replica_id * chunk_size
+                replica_chunk = dataset[replica_start:replica_start + chunk_size]
+                for j, vec in enumerate(replica_chunk):
+                    await local_graph.insert_local(vec.tolist(), replica_start + j)
+                print(f"[Node {proxy_port}] Replikat von ID {replica_id}: "
+                      f"{len(replica_chunk)} Vektoren geladen.")
+    except FileNotFoundError as e:
+        print(f"[Node {proxy_port}] Fehler: {e}")
 
     if bootstrap_port and bootstrap_port != "None":
         local_graph.add_neighbor_edge("127.0.0.1", int(bootstrap_port))
