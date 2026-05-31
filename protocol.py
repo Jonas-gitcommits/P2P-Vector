@@ -82,7 +82,7 @@ class DistributedRouter:
         if decision["action"] == "stop" or not decision["targets"]:
             return {"peers": [], "rpc_count": 0, "visited_nodes": set()}
 
-        targets = decision["targets"][:ROUTING_FANOUT]
+        targets = decision["targets"]
 
         visited_with_siblings = list(set(visited_peers) | set(targets))
 

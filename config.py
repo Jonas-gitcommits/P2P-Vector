@@ -6,6 +6,7 @@ PLACEMENT = 'clustered'
 EARLY_STOP_ENABLED = False
 EARLY_STOP_THRESHOLD = 44000.0
 ROUTING_FANOUT = 2
+ROUTING_STRATEGY = 'greedy'   # 'greedy' oder 'random' oder 'flood' 
 
 DIMENSION = 128
 MAX_NEIGHBORS = 8

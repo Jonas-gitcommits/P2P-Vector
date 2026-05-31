@@ -6,7 +6,7 @@ import numpy as np
 import faiss
 import random
 import sys
-from config import MAX_NEIGHBORS, HNSW_M, DIMENSION
+from config import MAX_NEIGHBORS, HNSW_M, DIMENSION, ROUTING_STRATEGY
 
 class LocalGraphState:
     def __init__(self, dimension=DIMENSION, M=HNSW_M, rng=None):
@@ -58,24 +58,31 @@ class LocalGraphState:
         return (await asyncio.to_thread(self.local_index.reconstruct, idx)).tolist()
 
     def evaluate_next_hop(self, query_vector, visited_peers, best_dist_so_far=None, fanout=2):
+        unvisited = [t for t, _ in self.neighbors.items() if t not in visited_peers]
+
+        if not unvisited:
+            return {"action": "stop", "targets": []}
+
+        if ROUTING_STRATEGY == 'flood':
+            return {"action": "hop", "targets": unvisited}
+
+        if ROUTING_STRATEGY == 'random':
+            return {"action": "hop",
+                    "targets": self.rng.sample(unvisited, min(fanout, len(unvisited)))}
+
+        # greedy: rank by minimum L2 to summary centroids; None summaries sort last
         query_np = np.array(query_vector, dtype=np.float32)
-        valid_neighbors = []
-        for target, summary in self.neighbors.items():
-            if target in visited_peers:
-                continue
+        scored = []
+        for target in unvisited:
+            summary = self.neighbors[target]
             if summary is None:
                 dist = float("inf")
             else:
-                diffs = summary - query_np      
+                diffs = summary - query_np      # (R, dim) − (dim,) → (R, dim)
                 dist = float(np.min(np.sum(diffs ** 2, axis=1)))
-            valid_neighbors.append((target, dist))
-
-        if not valid_neighbors:
-            return {"action": "stop", "targets": []}
-
-        valid_neighbors.sort(key=lambda x: x[1])
-        best_targets = [n[0] for n in valid_neighbors[:fanout]]
-        return {"action": "hop", "targets": best_targets}
+            scored.append((target, dist))
+        scored.sort(key=lambda x: x[1])
+        return {"action": "hop", "targets": [t for t, _ in scored[:fanout]]}
 
     def add_neighbor_edge(self, ip, port):
         target = f"{ip}:{port}"
