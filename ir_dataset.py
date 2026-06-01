@@ -11,8 +11,9 @@ _BATCH         = 512
 _NITER         = 50
 
 _CORPUS_HF     = "BeIR/msmarco"
-_N_CORPUS      = 150_000          
-_CORPUS_SEED   = 42               
+_N_CORPUS      = 150_000
+_N_QUERIES     = 7_000
+_CORPUS_SEED   = 42
 
 _CACHE_DIR     = "ir_cache"
 _CORPUS_CACHE  = os.path.join(_CACHE_DIR, "msmarco_corpus_150k_seed42.npy")
@@ -72,10 +73,12 @@ def _build_caches():
         for row in corpus_ds.select(indices)
     ]
 
-    print(f"[Cache-Build] Lade MS MARCO Dev-Queries ({_CORPUS_HF})…")
+    print(f"[Cache-Build] Lade MS MARCO Queries ({_CORPUS_HF})…")
     queries_ds = load_dataset(_CORPUS_HF, "queries", split="queries")
-    query_texts = [row["text"] for row in queries_ds]
-    print(f"  {len(query_texts):,} Dev-Queries")
+    rng_q = np.random.default_rng(_CORPUS_SEED + 1)
+    q_indices = sorted(rng_q.choice(len(queries_ds), size=min(_N_QUERIES, len(queries_ds)), replace=False).tolist())
+    query_texts = [queries_ds[int(i)]["text"] for i in q_indices]
+    print(f"  {len(query_texts):,} Queries (sample aus {len(queries_ds):,}, seed={_CORPUS_SEED + 1})")
 
     print(f"[Cache-Build] Lade Encoder '{_MODEL}'…")
     model = SentenceTransformer(_MODEL)

@@ -6,7 +6,7 @@ import numpy as np
 import faiss
 import random
 import sys
-from config import MAX_NEIGHBORS, HNSW_M, DIMENSION, ROUTING_STRATEGY
+from config import MAX_NEIGHBORS, HNSW_M, DIMENSION, ROUTING_STRATEGY, EARLY_STOP_ENABLED, EARLY_STOP_THRESHOLD
 
 class LocalGraphState:
     def __init__(self, dimension=DIMENSION, M=HNSW_M, rng=None):
@@ -70,7 +70,6 @@ class LocalGraphState:
             return {"action": "hop",
                     "targets": self.rng.sample(unvisited, min(fanout, len(unvisited)))}
 
-        # greedy: rank by minimum L2 to summary centroids; None summaries sort last
         query_np = np.array(query_vector, dtype=np.float32)
         scored = []
         for target in unvisited:
@@ -78,7 +77,7 @@ class LocalGraphState:
             if summary is None:
                 dist = float("inf")
             else:
-                diffs = summary - query_np      # (R, dim) − (dim,) → (R, dim)
+                diffs = summary - query_np      
                 dist = float(np.min(np.sum(diffs ** 2, axis=1)))
             scored.append((target, dist))
         scored.sort(key=lambda x: x[1])
@@ -116,7 +115,10 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
         rpc_count = 1
         visited_nodes = {my_id}
 
-        if request.ttl > 0:
+        _skip_forward = (EARLY_STOP_ENABLED and bool(local_res)
+                         and local_res[0][2] <= EARLY_STOP_THRESHOLD)
+
+        if request.ttl > 0 and not _skip_forward:
             remote_result = await self.router.distributed_search(
                 self.local_graph,
                 query_vec,

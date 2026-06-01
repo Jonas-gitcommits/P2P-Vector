@@ -21,7 +21,11 @@ def _t_crit(n):
 def build_ground_truth_ids(dataset, queries):
     central_index = faiss.IndexFlatL2(DIMENSION)
     central_index.add(dataset[:SUBSET_SIZE])
-    _, indices = central_index.search(queries, K)
+    dists, indices = central_index.search(queries, K)
+    nn1 = dists[:, 0]
+    print(f"Ground-Truth-Distanzstatistik (L2²) für {len(queries)} Queries: "
+          f"P50={np.percentile(nn1,50):.4f}  P75={np.percentile(nn1,75):.4f}  "
+          f"P90={np.percentile(nn1,90):.4f}  P95={np.percentile(nn1,95):.4f}")
     return [set(indices[i].tolist()) for i in range(len(queries))]
 
 
