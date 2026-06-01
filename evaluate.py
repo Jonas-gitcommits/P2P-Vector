@@ -98,7 +98,7 @@ def run_evaluation(early_stop_threshold=None, gossip_warmup_s=GOSSIP_WARMUP_S,
 
     fanout_k = max(K * 4, 20)
 
-    run_data = {ttl: {"recalls": [], "latencies": [], "p95_lats": [],
+    run_data = {ttl: {"recalls": [], "latencies": [], "p50_lats": [], "p95_lats": [], "p99_lats": [],
                       "rpcs": [], "unique": [],
                       "failures": [], "timeouts": [], "recalls_all": []}
                 for ttl in TTL_VALUES}
@@ -146,7 +146,9 @@ def run_evaluation(early_stop_threshold=None, gossip_warmup_s=GOSSIP_WARMUP_S,
             if q_recalls:
                 rd["recalls"].append(np.mean(q_recalls))
                 rd["latencies"].append(np.mean(q_lats))
+                rd["p50_lats"].append(np.percentile(q_lats, 50))
                 rd["p95_lats"].append(np.percentile(q_lats, 95))
+                rd["p99_lats"].append(np.percentile(q_lats, 99))
                 rd["rpcs"].append(np.mean(q_rpcs))
                 rd["unique"].append(np.mean(q_unique))
 
@@ -188,20 +190,22 @@ def run_evaluation(early_stop_threshold=None, gossip_warmup_s=GOSSIP_WARMUP_S,
             sem_lat = std_lat / np.sqrt(n_succ)
             lat_ci_lo = avg_lat - tc_succ * sem_lat
             lat_ci_hi = avg_lat + tc_succ * sem_lat
+            avg_p50_lat = np.mean(rd["p50_lats"])
             avg_p95_lat = np.mean(rd["p95_lats"])
+            avg_p99_lat = np.mean(rd["p99_lats"])
             avg_rpcs    = np.mean(rd["rpcs"])
             avg_unique  = np.mean(rd["unique"])
         else:
             avg_recall = ci_lo = ci_hi = std_recall = float("nan")
             avg_lat = lat_ci_lo = lat_ci_hi = std_lat = float("nan")
-            avg_p95_lat = avg_rpcs = avg_unique = float("nan")
+            avg_p50_lat = avg_p95_lat = avg_p99_lat = avg_rpcs = avg_unique = float("nan")
 
         print(f"TTL={ttl}: "
               f"recall_all={avg_recall_all:.2f}% [{ci_all_lo:.2f}, {ci_all_hi:.2f}]  "
               f"recall_ok={avg_recall:.2f}%  "
               f"fail={avg_failure_rate:.1%}  timeout={avg_timeout_rate:.1%}  "
               f"{avg_lat:.1f} [{lat_ci_lo:.1f}, {lat_ci_hi:.1f}] ms  "
-              f"p95={avg_p95_lat:.1f} ms  "
+              f"p50={avg_p50_lat:.1f}  p95={avg_p95_lat:.1f}  p99={avg_p99_lat:.1f} ms  "
               f"rpcs={avg_rpcs:.0f}  unique={avg_unique:.1f}  (n={n_all} Läufe)")
         csv_rows.append({
             "scenario":                    scenario_label,
@@ -219,7 +223,9 @@ def run_evaluation(early_stop_threshold=None, gossip_warmup_s=GOSSIP_WARMUP_S,
             "latency_std_ms":              round(std_lat, 4),
             "latency_ci95_low":            round(lat_ci_lo, 4),
             "latency_ci95_high":           round(lat_ci_hi, 4),
+            "latency_p50_ms":              round(avg_p50_lat, 4),
             "latency_p95_ms":              round(avg_p95_lat, 4),
+            "latency_p99_ms":              round(avg_p99_lat, 4),
             "rpc_count_mean":              round(avg_rpcs, 2),
             "unique_nodes_mean":           round(avg_unique, 2),
         })

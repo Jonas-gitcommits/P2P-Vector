@@ -2,7 +2,7 @@ import numpy as np
 import os
 import struct
 import faiss
-from config import SUBSET_SIZE, NUM_NODES, DIMENSION
+from config import SUBSET_SIZE, NUM_NODES, DIMENSION, DATASET
 
 SIFT_DIR = "sift_data/sift"
 
@@ -62,6 +62,11 @@ def _compute_partition(base):
 
 
 def generate_dataset():
+    if DATASET == 'ir':
+        from ir_dataset import generate_ir_dataset
+        generate_ir_dataset()
+        return
+
     base_path  = os.path.join(SIFT_DIR, "sift_base.fvecs")
     query_path = os.path.join(SIFT_DIR, "sift_query.fvecs")
     gt_path    = os.path.join(SIFT_DIR, "sift_groundtruth.ivecs")

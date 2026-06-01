@@ -8,7 +8,8 @@ EARLY_STOP_THRESHOLD = 44000.0
 ROUTING_FANOUT = 2
 ROUTING_STRATEGY = 'greedy'   # 'greedy' oder 'random' oder 'flood' 
 
-DIMENSION = 128
+DATASET   = 'ir'   # 'ir' oder 'sift'
+DIMENSION = 128 if DATASET == 'sift' else 384
 MAX_NEIGHBORS = 8
 HNSW_M = 32
 
