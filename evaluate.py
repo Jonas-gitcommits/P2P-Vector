@@ -6,10 +6,12 @@ import time
 import random
 import csv
 import faiss
+import os
+import pickle
 from config import (
     NUM_NODES, SUBSET_SIZE, EARLY_STOP_ENABLED, EARLY_STOP_THRESHOLD,
     TOXIPROXY_ENABLED, PROXY_PORT_START, REAL_PORT_START,
-    NUM_QUERIES, NUM_RUNS, K, TTL_VALUES, DIMENSION, GOSSIP_WARMUP_S,
+    NUM_QUERIES, NUM_RUNS, K, TTL_VALUES, DIMENSION, GOSSIP_WARMUP_S, DATASET
 )
 _PORT_START = PROXY_PORT_START if TOXIPROXY_ENABLED else REAL_PORT_START
 ALL_NODES = [f"127.0.0.1:{_PORT_START + i}" for i in range(NUM_NODES)]
@@ -19,14 +21,28 @@ def _t_crit(n):
     return float(t.ppf(0.975, n - 1))
 
 def build_ground_truth_ids(dataset, queries):
+    cache_file = f"gt_cache_{DATASET}_size{SUBSET_SIZE}_k{K}.pkl"
+    
+    if os.path.exists(cache_file):
+        print(f"  [Cache] Lade Ground-Truth aus {cache_file}...")
+        with open(cache_file, "rb") as f:
+            return pickle.load(f)
+
+    print(f"  [Cache Miss] Berechne Ground-Truth über FAISS (wird in {cache_file} gespeichert)...")
     central_index = faiss.IndexFlatL2(DIMENSION)
     central_index.add(dataset[:SUBSET_SIZE])
     dists, indices = central_index.search(queries, K)
+    
     nn1 = dists[:, 0]
     print(f"Ground-Truth-Distanzstatistik (L2²) für {len(queries)} Queries: "
           f"P50={np.percentile(nn1,50):.4f}  P75={np.percentile(nn1,75):.4f}  "
           f"P90={np.percentile(nn1,90):.4f}  P95={np.percentile(nn1,95):.4f}")
-    return [set(indices[i].tolist()) for i in range(len(queries))]
+    
+    true_ids = [set(indices[i].tolist()) for i in range(len(queries))]
+    with open(cache_file, "wb") as f:
+        pickle.dump(true_ids, f)
+        
+    return true_ids
 
 
 def get_alive_nodes(nodes):
