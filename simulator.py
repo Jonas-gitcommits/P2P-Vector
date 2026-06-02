@@ -9,7 +9,7 @@ from config import (
     TOXIPROXY_ENABLED, REAL_PORT_START, PROXY_PORT_START,
     FAULT_INJECTION_ENABLED, FAULT_KILL_INTERVAL, FAULT_KILL_PROBABILITY,
     FAULT_MAX_DOWN, FAULT_RESTART_DELAY, FAULT_SEED,
-    LATENCY_SCENARIO, NODE_BASE_SEED,
+    LATENCY_SCENARIO, SEED,
 )
 
 processes = []
@@ -25,7 +25,7 @@ def _make_cmd(i: int) -> list:
         bootstrap_str = "None"
     else:
         bootstrap_str = str(PROXY_PORT_START if TOXIPROXY_ENABLED else REAL_PORT_START)
-    return [sys.executable, "node.py", str(real_port), bootstrap_str, str(i), str(proxy_port), str(NODE_BASE_SEED + i)]
+    return [sys.executable, "node.py", str(real_port), bootstrap_str, str(i), str(proxy_port), str(SEED + i)]
 
 
 def start_network():

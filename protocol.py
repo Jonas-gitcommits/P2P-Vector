@@ -6,7 +6,8 @@ import asyncio
 import random
 from config import (
     GOSSIP_INTERVAL_S, HEALTH_CHECK_INTERVAL_S, PING_TIMEOUT_S,
-    RPC_TIMEOUT_BASE_S, LATENCY_PRESETS, LATENCY_SCENARIO,
+    RPC_TIMEOUT_BASE_S, LATENCY_PRESETS, LATENCY_SCENARIO, ROUTING_ALPHA,
+    ROUTING_EF, ROUTING_DEBUG,
 )
 
 class DistributedRouter:
@@ -113,6 +114,110 @@ class DistributedRouter:
                 unique_results.append((ip, port, dist, gid))
 
         return {"peers": unique_results[:max(fanout_k, k)], "rpc_count": total_rpcs, "visited_nodes": all_visited}
+
+    async def query_node(self, target, query_vector, k):
+        channel = self._get_channel(target)
+        stub = p2p_pb2_grpc.VectorStoreStub(channel)
+        query_bytes = np.array(query_vector, dtype=np.float32).tobytes()
+        request = p2p_pb2.QueryNodeRequest(
+            query=p2p_pb2.Vector(values=query_bytes),
+            k=k,
+        )
+        try:
+            response = await stub.QueryNode(request, timeout=RPC_TIMEOUT_BASE_S)
+            peers = [
+                (p.ip, p.port, d, gid)
+                for p, d, gid in zip(
+                    response.nearest_peers, response.distances, response.vector_ids
+                )
+            ]
+            neighbor_summaries = {}
+            for nb in response.neighbors:
+                if nb.summary_count > 0 and nb.summary:
+                    arr = np.frombuffer(nb.summary, dtype=np.float32).reshape(nb.summary_count, -1).copy()
+                    neighbor_summaries[nb.target] = arr
+                else:
+                    neighbor_summaries[nb.target] = None
+            return {"peers": peers, "neighbor_summaries": neighbor_summaries}
+        except grpc.RpcError:
+            return None
+
+    async def iterative_search(self, local_graph, query_vector, k, ttl):
+        query_np = np.array(query_vector, dtype=np.float32)
+        my_id = f"{self.my_ip}:{self.my_port}"
+
+        def score_summary(summary):
+            if summary is None:
+                return float("inf")
+            diffs = summary - query_np
+            return float(np.min(np.sum(diffs ** 2, axis=1)))
+
+        shortlist = dict(local_graph.neighbors)
+        first_hop_neighbors = set(local_graph.neighbors.keys())
+
+        queried = set()
+        visited_nodes = {my_id}
+        rpc_count = 1  
+        non_first_hop_count = 0
+
+        local_res = await local_graph.search_local(query_vector, k, self.my_ip, self.my_port)
+        global_top = list(local_res)
+
+        for _round in range(ttl):
+            candidates = sorted(
+                (score_summary(shortlist[t]), t)
+                for t in shortlist
+                if t not in queried
+            )
+
+            if not candidates:
+                break
+
+            best_score = candidates[0][0]
+            top_k_sorted = sorted(global_top, key=lambda x: x[2])[:k]
+            if (len(queried) >= ROUTING_EF
+                    and len(top_k_sorted) >= k
+                    and best_score >= top_k_sorted[k - 1][2]):
+                break
+
+            batch = [t for _, t in candidates[:ROUTING_ALPHA]]
+            queried.update(batch)
+            visited_nodes.update(batch)
+            rpc_count += len(batch)
+
+            for t in batch:
+                if t not in first_hop_neighbors:
+                    non_first_hop_count += 1
+
+            tasks = [self.query_node(t, query_vector, k) for t in batch]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for result in results:
+                if result is None or isinstance(result, Exception):
+                    continue
+                global_top.extend(result["peers"])
+                for nb_target, nb_summary in result["neighbor_summaries"].items():
+                    if nb_target not in queried and nb_target != my_id and nb_target not in shortlist:
+                        shortlist[nb_target] = nb_summary
+
+        if ROUTING_DEBUG:
+            total_q = len(queried)
+            ratio = non_first_hop_count / max(total_q, 1)
+            print(
+                f"[iterative diag {my_id}] queried={total_q} "
+                f"non_first_hop={non_first_hop_count} ({ratio:.0%})",
+                flush=True,
+            )
+
+        global_top.sort(key=lambda x: x[2])
+        seen = set()
+        final = []
+        for ip, port, dist, gid in global_top:
+            if gid not in seen:
+                seen.add(gid)
+                final.append((ip, port, dist, gid))
+
+        return {"peers": final[:k], "rpc_count": rpc_count, "visited_nodes": visited_nodes}
 
     async def start_gossip_loop(self, local_graph):
         while True:

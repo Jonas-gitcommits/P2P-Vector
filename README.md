@@ -59,3 +59,9 @@ python evaluate.py
 
 Latenz und Verbindungsabbrüche werden über `LATENCY_SCENARIO` und
 `TOXIC_CONN_DROP_PCT` in `config.py` konfiguriert.
+
+Standard-Sicherheitslimit bei Linux ist bei 1024 gleichzeitig offenen Sockets. Wenn dieses Limit erreicht wird, stürzt gRPC ab.
+Limit hochsetzen mit: 
+```bash
+ulimit -n 8192
+```

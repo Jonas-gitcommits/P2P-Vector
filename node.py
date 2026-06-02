@@ -6,7 +6,7 @@ import numpy as np
 import faiss
 import random
 import sys
-from config import MAX_NEIGHBORS, HNSW_M, DIMENSION, ROUTING_STRATEGY, EARLY_STOP_ENABLED, EARLY_STOP_THRESHOLD
+from config import MAX_NEIGHBORS, HNSW_M, DIMENSION, ROUTING_STRATEGY, EARLY_STOP_ENABLED, EARLY_STOP_THRESHOLD, ROUTING_ALPHA
 
 class LocalGraphState:
     def __init__(self, dimension=DIMENSION, M=HNSW_M, rng=None):
@@ -104,6 +104,22 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
             self.local_graph.add_neighbor_edge(request.sender_ip, request.sender_port)
 
         is_entry = (request.sender_port == 9999)
+
+        if ROUTING_STRATEGY == 'iterative' and is_entry:
+            iter_result = await self.router.iterative_search(
+                self.local_graph, query_vec, request.k, request.ttl
+            )
+            response = p2p_pb2.SearchResponse()
+            for ip, port, dist, gid in iter_result["peers"]:
+                p = response.nearest_peers.add()
+                p.ip = ip
+                p.port = port
+                response.distances.append(dist)
+                response.vector_ids.append(gid)
+            response.rpc_count = iter_result["rpc_count"]
+            response.visited_nodes.extend(sorted(iter_result["visited_nodes"]))
+            return response
+
         fanout_k = request.fanout_k if request.fanout_k > 0 else max(request.k * 4, 20)
         local_budget = max(fanout_k, request.k)
 
@@ -156,7 +172,27 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
         response.visited_nodes.extend(sorted(visited_nodes))
 
         return response
-    
+
+    async def QueryNode(self, request, context):
+        query_vec = np.frombuffer(request.query.values, dtype=np.float32).tolist()
+        local_res = await self.local_graph.search_local(
+            query_vec, request.k, "127.0.0.1", self.port
+        )
+        response = p2p_pb2.QueryNodeResponse()
+        for ip, port, dist, gid in local_res:
+            p = response.nearest_peers.add()
+            p.ip = ip
+            p.port = port
+            response.distances.append(dist)
+            response.vector_ids.append(gid)
+        for target, summary in self.local_graph.neighbors.items():
+            nb = response.neighbors.add()
+            nb.target = target
+            if summary is not None:
+                nb.summary = summary.tobytes()
+                nb.summary_count = len(summary)
+        return response
+
     async def Ping(self, request, context):
         summary_bytes, summary_count = await self.local_graph.compute_summary()
         return p2p_pb2.PingResponse(
