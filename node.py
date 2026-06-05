@@ -6,7 +6,7 @@ import numpy as np
 import faiss
 import random
 import sys
-from config import MAX_NEIGHBORS, HNSW_M, DIMENSION, ROUTING_STRATEGY, EARLY_STOP_ENABLED, EARLY_STOP_THRESHOLD, ROUTING_ALPHA
+from config import HNSW_M, DIMENSION, ROUTING_STRATEGY, EARLY_STOP_ENABLED, EARLY_STOP_THRESHOLD
 
 class LocalGraphState:
     def __init__(self, dimension=DIMENSION, M=HNSW_M, rng=None):
@@ -22,16 +22,15 @@ class LocalGraphState:
         self.global_ids.append(global_id)
 
     async def search_local(self, query_vector, k, my_ip, my_port):
+        if self.local_index.ntotal == 0:
+            return []
         query_np = np.array([query_vector], dtype=np.float32)
-        results = []
-
-        if self.local_index.ntotal > 0:
-            search_k = min(k, self.local_index.ntotal)
-            dist, idx = await asyncio.to_thread(self.local_index.search, query_np, search_k)
-            for d, i in zip(dist[0], idx[0]):
-                if i >= 0 and np.isfinite(d):
-                    results.append((my_ip, my_port, float(d), self.global_ids[i]))
-
+        search_k = min(k, self.local_index.ntotal)
+        dist, idx = await asyncio.to_thread(self.local_index.search, query_np, search_k)
+        results = [
+            (my_ip, my_port, float(d), self.global_ids[i])
+            for d, i in zip(dist[0], idx[0]) if i >= 0 and np.isfinite(d)
+        ]
         results.sort(key=lambda x: x[2])
         return results[:k]
 
@@ -57,8 +56,8 @@ class LocalGraphState:
         idx = self.rng.randint(0, self.local_index.ntotal - 1)
         return (await asyncio.to_thread(self.local_index.reconstruct, idx)).tolist()
 
-    def evaluate_next_hop(self, query_vector, visited_peers, best_dist_so_far=None, fanout=2):
-        unvisited = [t for t, _ in self.neighbors.items() if t not in visited_peers]
+    def evaluate_next_hop(self, query_vector, visited_peers, fanout=2):
+        unvisited = [t for t in self.neighbors if t not in visited_peers]
 
         if not unvisited:
             return {"action": "stop", "targets": []}
@@ -71,17 +70,12 @@ class LocalGraphState:
                     "targets": self.rng.sample(unvisited, min(fanout, len(unvisited)))}
 
         query_np = np.array(query_vector, dtype=np.float32)
-        scored = []
-        for target in unvisited:
-            summary = self.neighbors[target]
-            if summary is None:
-                dist = float("inf")
-            else:
-                diffs = summary - query_np      
-                dist = float(np.min(np.sum(diffs ** 2, axis=1)))
-            scored.append((target, dist))
-        scored.sort(key=lambda x: x[1])
-        return {"action": "hop", "targets": [t for t, _ in scored[:fanout]]}
+
+        def _dist(t):
+            s = self.neighbors[t]
+            return float("inf") if s is None else float(np.min(np.sum((s - query_np) ** 2, axis=1)))
+
+        return {"action": "hop", "targets": sorted(unvisited, key=_dist)[:fanout]}
 
     def add_neighbor_edge(self, ip, port):
         target = f"{ip}:{port}"
@@ -174,7 +168,7 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
         return response
 
     async def QueryNode(self, request, context):
-        query_vec = np.frombuffer(request.query.values, dtype=np.float32).tolist()
+        query_vec = np.frombuffer(request.query.values, dtype=np.float32).tolist() 
         local_res = await self.local_graph.search_local(
             query_vec, request.k, "127.0.0.1", self.port
         )
@@ -276,4 +270,7 @@ if __name__ == '__main__':
     proxy_p = int(sys.argv[4]) if len(sys.argv) > 4 else real_p
     seed = int(sys.argv[5]) if len(sys.argv) > 5 else 0
 
-    asyncio.run(serve(real_p, b, n_id, proxy_p, seed))
+    try:
+        asyncio.run(serve(real_p, b, n_id, proxy_p, seed))
+    except (KeyboardInterrupt, SystemExit):
+        pass

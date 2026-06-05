@@ -7,7 +7,7 @@ import random
 from config import (
     GOSSIP_INTERVAL_S, HEALTH_CHECK_INTERVAL_S, PING_TIMEOUT_S,
     RPC_TIMEOUT_BASE_S, LATENCY_PRESETS, LATENCY_SCENARIO, ROUTING_ALPHA,
-    ROUTING_EF, ROUTING_DEBUG,
+    ROUTING_EF, ROUTING_DEBUG, ROUTING_FANOUT,
 )
 
 class DistributedRouter:
@@ -73,7 +73,6 @@ class DistributedRouter:
         if ttl <= 0:
             return {"peers": [], "rpc_count": 0, "visited_nodes": set()}
 
-        from config import ROUTING_FANOUT
         if early_stop_threshold > 0 and kth_dist > 0 and kth_dist <= early_stop_threshold:
             return {"peers": [], "rpc_count": 0, "visited_nodes": set()}
 

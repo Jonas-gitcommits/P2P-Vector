@@ -73,7 +73,7 @@ def _stop_chaos_loop():
 def _chaos_worker():
     rng = random.Random(FAULT_SEED)
     
-    down: dict = {}
+    down = {}
 
     while not _chaos_stop.is_set():
         _chaos_stop.wait(FAULT_KILL_INTERVAL)
