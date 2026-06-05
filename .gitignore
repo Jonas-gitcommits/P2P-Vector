@@ -1,10 +1,12 @@
-_pycache__/
+__pycache__/
 venv/
 *.py[cod]
-toxiproxy_2.12.0_linux_amd64
 sift_data/
-sift.tar.gz
+ir_cache/
 *.npy
+*.fvecs
+*.ivecs
+*.pkl
 *.csv
 *_pb2.py
 *_pb2_grpc.py

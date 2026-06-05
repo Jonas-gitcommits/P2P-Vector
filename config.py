@@ -31,12 +31,9 @@ TTL_VALUES = [4]
 GOSSIP_WARMUP_S = 10
 
 LATENCY_PRESETS = {
-    "none":             (0,   0),
-    "lan":              (1,   1),
-    "same_region":      (5,   2),
-    "same_continent":   (30,  10),
-    "intercontinental": (100, 30),
-    "mobile":           (150, 80),
+    "none":(0,   0),
+    "mid":(30,  10),
+    "high":(100, 30)
 }
 LATENCY_SCENARIO = 'none'
 
