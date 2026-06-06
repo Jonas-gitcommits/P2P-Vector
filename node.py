@@ -120,7 +120,12 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
         local_res = await self.local_graph.search_local(query_vec, local_budget, "127.0.0.1", self.port)
         combined_res = list(local_res)
 
-        kth_dist = float(local_res[-1][2]) if local_res else request.kth_dist
+        if len(local_res) >= request.k:
+            kth_dist = float(local_res[request.k - 1][2])
+        elif local_res:
+            kth_dist = float(local_res[-1][2])
+        else:
+            kth_dist = request.kth_dist
         my_id = f"127.0.0.1:{self.port}"
         rpc_count = 1
         visited_nodes = {my_id}

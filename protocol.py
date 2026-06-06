@@ -64,8 +64,7 @@ class DistributedRouter:
                                  kth_dist=0.0, fanout_k=0, early_stop_threshold=0.0):
         my_target = f"{self.my_ip}:{self.my_port}"
 
-        if visited_peers is None:
-            visited_peers = []
+        visited_peers = list(visited_peers) if visited_peers else []
 
         if my_target not in visited_peers:
             visited_peers.append(my_target)
@@ -196,7 +195,9 @@ class DistributedRouter:
                     continue
                 global_top.extend(result["peers"])
                 for nb_target, nb_summary in result["neighbor_summaries"].items():
-                    if nb_target not in queried and nb_target != my_id and nb_target not in shortlist:
+                    if nb_target in queried or nb_target == my_id:
+                        continue
+                    if nb_target not in shortlist or (shortlist[nb_target] is None and nb_summary is not None):
                         shortlist[nb_target] = nb_summary
 
         if ROUTING_DEBUG:
@@ -227,12 +228,11 @@ class DistributedRouter:
             target = self.rng.choice(list(local_graph.neighbors.keys()))
             my_target = f"{self.my_ip}:{self.my_port}"
 
-            probe = None
-            for summary in local_graph.neighbors.values():
-                if summary is not None:
-                    probe = summary[self.rng.randint(0, len(summary) - 1)].tolist()
-                    break
-            if probe is None:
+            candidates = [s for s in local_graph.neighbors.values() if s is not None]
+            if candidates:
+                summary = self.rng.choice(candidates)
+                probe = summary[self.rng.randint(0, len(summary) - 1)].tolist()
+            else:
                 probe = [0.0] * local_graph.dimension
 
             try:
@@ -245,7 +245,7 @@ class DistributedRouter:
                     local_graph.add_neighbor_edge(ip, port)
             except Exception:
                 pass
-
+  
     async def health_check_loop(self, local_graph):
         while True:
             await asyncio.sleep(HEALTH_CHECK_INTERVAL_S)

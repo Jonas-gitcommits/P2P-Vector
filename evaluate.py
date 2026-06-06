@@ -1,47 +1,42 @@
+import importlib
 import grpc
 import p2p_pb2
 import p2p_pb2_grpc
 import numpy as np
 import time
 import random
-import csv
 import faiss
 import os
 import pickle
-from config import (
-    NUM_NODES, SUBSET_SIZE, EARLY_STOP_ENABLED, EARLY_STOP_THRESHOLD,
-    TOXIPROXY_ENABLED, PROXY_PORT_START, REAL_PORT_START,
-    NUM_QUERIES, NUM_RUNS, K, TTL_VALUES, DIMENSION, GOSSIP_WARMUP_S, DATASET
-)
-_PORT_START = PROXY_PORT_START if TOXIPROXY_ENABLED else REAL_PORT_START
-ALL_NODES = [f"127.0.0.1:{_PORT_START + i}" for i in range(NUM_NODES)]
-
 from scipy.stats import t
+
+
 def _t_crit(n):
     return float(t.ppf(0.975, n - 1))
 
-def build_ground_truth_ids(dataset, queries):
-    cache_file = f"gt_cache_{DATASET}_size{SUBSET_SIZE}_k{K}.pkl"
-    
+
+def build_ground_truth_ids(dataset, queries, subset_size, k, dimension, dataset_name):
+    import hashlib
+    h = hashlib.md5(dataset[:subset_size].tobytes()).hexdigest()[:8]
+    cache_file = f"gt_cache_{dataset_name}_size{subset_size}_k{k}_{h}.pkl"
     if os.path.exists(cache_file):
         print(f"  [Cache] Lade Ground-Truth aus {cache_file}...")
         with open(cache_file, "rb") as f:
             return pickle.load(f)
 
-    print(f"  [Cache Miss] Berechne Ground-Truth über FAISS (wird in {cache_file} gespeichert)...")
-    central_index = faiss.IndexFlatL2(DIMENSION)
-    central_index.add(dataset[:SUBSET_SIZE])
-    dists, indices = central_index.search(queries, K)
-    
+    print(f"  [Cache Miss] Berechne Ground-Truth via FAISS (wird in {cache_file} gespeichert)...")
+    central_index = faiss.IndexFlatL2(dimension)
+    central_index.add(dataset[:subset_size])
+    dists, indices = central_index.search(queries, k)
+
     nn1 = dists[:, 0]
     print(f"Ground-Truth-Distanzstatistik (L2²) für {len(queries)} Queries: "
           f"P50={np.percentile(nn1,50):.4f}  P75={np.percentile(nn1,75):.4f}  "
           f"P90={np.percentile(nn1,90):.4f}  P95={np.percentile(nn1,95):.4f}")
-    
+
     true_ids = [set(indices[i].tolist()) for i in range(len(queries))]
     with open(cache_file, "wb") as f:
         pickle.dump(true_ids, f)
-        
     return true_ids
 
 
@@ -77,34 +72,43 @@ def make_request(query_vector, k, ttl, fanout_k, early_stop_threshold=0.0):
     )
 
 
-def run_evaluation(early_stop_threshold=None, gossip_warmup_s=GOSSIP_WARMUP_S,
-                   scenario_label="default"):
-    if early_stop_threshold is None:
-        early_stop_threshold = EARLY_STOP_THRESHOLD if EARLY_STOP_ENABLED else 0.0
+def run_evaluation():
+    import config as _cfg
+    importlib.reload(_cfg)
+    from config import (
+        NUM_NODES, SUBSET_SIZE, EARLY_STOP_ENABLED, EARLY_STOP_THRESHOLD,
+        TOXIPROXY_ENABLED, PROXY_PORT_START, REAL_PORT_START,
+        NUM_QUERIES, NUM_RUNS, K, TTL_VALUES, DIMENSION, GOSSIP_WARMUP_S,
+        DATASET, LATENCY_SCENARIO, SEED, ROUTING_STRATEGY,
+    )
+
+    early_stop_threshold = EARLY_STOP_THRESHOLD if EARLY_STOP_ENABLED else 0.0
+    port_start = PROXY_PORT_START if TOXIPROXY_ENABLED else REAL_PORT_START
+    all_nodes = [f"127.0.0.1:{port_start + i}" for i in range(NUM_NODES)]
 
     print("Lade Datensatz...")
-    dataset = np.load("dataset.npy").astype(np.float32)
+    dataset     = np.load("dataset.npy").astype(np.float32)
     all_queries = np.load("queries.npy").astype(np.float32)
     print(f"  dataset: {dataset.shape}, queries verfügbar: {all_queries.shape}")
-    print(f"  SUBSET_SIZE={SUBSET_SIZE}, early_stop_threshold={early_stop_threshold}, "
-          f"scenario={scenario_label}")
+    print(f"  routing={ROUTING_STRATEGY}  SUBSET_SIZE={SUBSET_SIZE}  "
+          f"early_stop={early_stop_threshold}  scenario={LATENCY_SCENARIO}")
 
-    print("Berechne Ground-Truth-IDs (alle Queries)...")
-    true_ids_all = build_ground_truth_ids(dataset, all_queries)
+    print("Berechne Ground-Truth-IDs...")
+    true_ids_all = build_ground_truth_ids(dataset, all_queries, SUBSET_SIZE, K, DIMENSION, DATASET)
     print(f"  Fertig: {len(true_ids_all)} Referenzmengen.\n")
 
-    if gossip_warmup_s > 0:
-        print(f"Warte {gossip_warmup_s}s für Gossip-Konvergenz...")
-        time.sleep(gossip_warmup_s)
+    if GOSSIP_WARMUP_S > 0:
+        print(f"Warte {GOSSIP_WARMUP_S}s für Gossip-Konvergenz...")
+        time.sleep(GOSSIP_WARMUP_S)
 
-    alive_nodes = get_alive_nodes(ALL_NODES)
-    print(f"Erreichbar: {len(alive_nodes)}/{len(ALL_NODES)}")
+    alive_nodes = get_alive_nodes(all_nodes)
+    print(f"Erreichbar: {len(alive_nodes)}/{len(all_nodes)}")
     if not alive_nodes:
         print("Keine Knoten erreichbar! Abbruch.")
         return []
 
     channels = {n: grpc.insecure_channel(n) for n in alive_nodes}
-    stubs = {n: p2p_pb2_grpc.VectorStoreStub(channels[n]) for n in alive_nodes}
+    stubs    = {n: p2p_pb2_grpc.VectorStoreStub(channels[n]) for n in alive_nodes}
 
     nb_counts = []
     for stub in stubs.values():
@@ -117,22 +121,19 @@ def run_evaluation(early_stop_threshold=None, gossip_warmup_s=GOSSIP_WARMUP_S,
               f"(min={min(nb_counts)}, max={max(nb_counts)})")
 
     fanout_k = max(K * 4, 20)
-
     run_data = {ttl: {"recalls": [], "latencies": [], "p50_lats": [], "p95_lats": [], "p99_lats": [],
-                      "rpcs": [], "unique": [],
-                      "failures": [], "timeouts": [], "recalls_all": []}
+                      "rpcs": [], "unique": [], "failures": [], "timeouts": [], "recalls_all": []}
                 for ttl in TTL_VALUES}
 
     for run_id in range(NUM_RUNS):
-        rng = random.Random(42 + run_id)
+        rng = random.Random(SEED + run_id)
         idx = rng.sample(range(len(all_queries)), NUM_QUERIES)
-        run_queries = all_queries[idx]
+        run_queries  = all_queries[idx]
         run_true_ids = [true_ids_all[j] for j in idx]
-        entry_nodes = [rng.choice(alive_nodes) for _ in range(NUM_QUERIES)]
+        entry_nodes  = [rng.choice(alive_nodes) for _ in range(NUM_QUERIES)]
 
         for ttl in TTL_VALUES:
             print(f"Run {run_id + 1}/{NUM_RUNS} | TTL={ttl} ({NUM_QUERIES} Queries)...")
-
             q_recalls, q_lats, q_rpcs, q_unique = [], [], [], []
             q_failures, q_timeouts = 0, 0
 
@@ -162,7 +163,6 @@ def run_evaluation(early_stop_threshold=None, gossip_warmup_s=GOSSIP_WARMUP_S,
             rd["failures"].append(q_failures)
             rd["timeouts"].append(q_timeouts)
             rd["recalls_all"].append(sum(q_recalls) / NUM_QUERIES)
-
             if q_recalls:
                 rd["recalls"].append(np.mean(q_recalls))
                 rd["latencies"].append(np.mean(q_lats))
@@ -175,49 +175,48 @@ def run_evaluation(early_stop_threshold=None, gossip_warmup_s=GOSSIP_WARMUP_S,
     for ch in channels.values():
         ch.close()
 
-    print()
-    csv_rows = []
-
+    rows = []
     for ttl in TTL_VALUES:
         rd = run_data[ttl]
         n_all = len(rd["recalls_all"])
         if not n_all:
             continue
-        tc_all = _t_crit(n_all)
-
         avg_failure_rate = np.mean(rd["failures"]) / NUM_QUERIES
         avg_timeout_rate = np.mean(rd["timeouts"]) / NUM_QUERIES
 
-        recalls_all = rd["recalls_all"]
+        recalls_all    = rd["recalls_all"]
         avg_recall_all = np.mean(recalls_all) * 100
-        std_recall_all = np.std(recalls_all, ddof=1) * 100
-        sem_recall_all = std_recall_all / np.sqrt(n_all)
-        ci_all_lo = max(0.0, avg_recall_all - tc_all * sem_recall_all)
-        ci_all_hi = min(100.0, avg_recall_all + tc_all * sem_recall_all)
+        if n_all >= 2:
+            sem = np.std(recalls_all, ddof=1) * 100 / np.sqrt(n_all)
+            tc  = _t_crit(n_all)
+            ci_all_lo = max(0.0,   avg_recall_all - tc * sem)
+            ci_all_hi = min(100.0, avg_recall_all + tc * sem)
+        else:
+            ci_all_lo = ci_all_hi = float("nan")
 
         run_recalls = rd["recalls"]
         n_succ = len(run_recalls)
         if n_succ > 0:
-            tc_succ = _t_crit(n_succ)
-            avg_recall = np.mean(run_recalls) * 100
-            std_recall = np.std(run_recalls, ddof=1) * 100
-            sem_recall = std_recall / np.sqrt(n_succ)
-            ci_lo = max(0.0, avg_recall - tc_succ * sem_recall)
-            ci_hi = min(100.0, avg_recall + tc_succ * sem_recall)
-
-            avg_lat = np.mean(rd["latencies"])
-            std_lat = np.std(rd["latencies"], ddof=1)
-            sem_lat = std_lat / np.sqrt(n_succ)
-            lat_ci_lo = avg_lat - tc_succ * sem_lat
-            lat_ci_hi = avg_lat + tc_succ * sem_lat
+            avg_recall  = np.mean(run_recalls) * 100
+            avg_lat     = np.mean(rd["latencies"])
             avg_p50_lat = np.mean(rd["p50_lats"])
             avg_p95_lat = np.mean(rd["p95_lats"])
             avg_p99_lat = np.mean(rd["p99_lats"])
             avg_rpcs    = np.mean(rd["rpcs"])
             avg_unique  = np.mean(rd["unique"])
+            if n_succ >= 2:
+                tc_s    = _t_crit(n_succ)
+                sem_r   = np.std(run_recalls,      ddof=1) * 100 / np.sqrt(n_succ)
+                sem_l   = np.std(rd["latencies"],  ddof=1)       / np.sqrt(n_succ)
+                ci_lo     = max(0.0,   avg_recall - tc_s * sem_r)
+                ci_hi     = min(100.0, avg_recall + tc_s * sem_r)
+                lat_ci_lo = avg_lat - tc_s * sem_l
+                lat_ci_hi = avg_lat + tc_s * sem_l
+            else:
+                ci_lo = ci_hi = lat_ci_lo = lat_ci_hi = float("nan")
         else:
-            avg_recall = ci_lo = ci_hi = std_recall = float("nan")
-            avg_lat = lat_ci_lo = lat_ci_hi = std_lat = float("nan")
+            avg_recall = ci_lo = ci_hi = float("nan")
+            avg_lat = lat_ci_lo = lat_ci_hi = float("nan")
             avg_p50_lat = avg_p95_lat = avg_p99_lat = avg_rpcs = avg_unique = float("nan")
 
         print(f"TTL={ttl}: "
@@ -226,9 +225,9 @@ def run_evaluation(early_stop_threshold=None, gossip_warmup_s=GOSSIP_WARMUP_S,
               f"fail={avg_failure_rate:.1%}  timeout={avg_timeout_rate:.1%}  "
               f"{avg_lat:.1f} [{lat_ci_lo:.1f}, {lat_ci_hi:.1f}] ms  "
               f"p50={avg_p50_lat:.1f}  p95={avg_p95_lat:.1f}  p99={avg_p99_lat:.1f} ms  "
-              f"rpcs={avg_rpcs:.0f}  unique={avg_unique:.1f}  (n={n_all} Läufe)")
-        csv_rows.append({
-            "scenario":                    scenario_label,
+              f"rpcs={avg_rpcs:.0f}  unique={avg_unique:.1f}  "
+              f"(n_all={n_all}, n_ok={n_succ})")
+        rows.append({
             "ttl":                         ttl,
             "n_runs":                      n_all,
             "failure_rate":                round(avg_failure_rate, 6),
@@ -240,7 +239,6 @@ def run_evaluation(early_stop_threshold=None, gossip_warmup_s=GOSSIP_WARMUP_S,
             "recall_on_success_ci95_low":  round(ci_lo, 4),
             "recall_on_success_ci95_high": round(ci_hi, 4),
             "latency_mean_ms":             round(avg_lat, 4),
-            "latency_std_ms":              round(std_lat, 4),
             "latency_ci95_low":            round(lat_ci_lo, 4),
             "latency_ci95_high":           round(lat_ci_hi, 4),
             "latency_p50_ms":              round(avg_p50_lat, 4),
@@ -249,17 +247,8 @@ def run_evaluation(early_stop_threshold=None, gossip_warmup_s=GOSSIP_WARMUP_S,
             "rpc_count_mean":              round(avg_rpcs, 2),
             "unique_nodes_mean":           round(avg_unique, 2),
         })
-
-    return csv_rows
+    return rows
 
 
 if __name__ == "__main__":
-    rows = run_evaluation()
-    if rows:
-        csv_path = "results.csv"
-        fieldnames = list(rows[0].keys())
-        with open(csv_path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(rows)
-        print(f"\nCSV gespeichert: {csv_path}")
+    run_evaluation()
