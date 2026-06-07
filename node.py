@@ -57,7 +57,8 @@ class LocalGraphState:
         return (await asyncio.to_thread(self.local_index.reconstruct, idx)).tolist()
 
     def evaluate_next_hop(self, query_vector, visited_peers, fanout=2):
-        unvisited = [t for t in self.neighbors if t not in visited_peers]
+        visited_set = set(visited_peers)
+        unvisited = [t for t in self.neighbors if t not in visited_set]
 
         if not unvisited:
             return {"action": "stop", "targets": []}

@@ -121,8 +121,9 @@ def run_evaluation():
               f"(min={min(nb_counts)}, max={max(nb_counts)})")
 
     fanout_k = max(K * 4, 20)
-    run_data = {ttl: {"recalls": [], "latencies": [], "p50_lats": [], "p95_lats": [], "p99_lats": [],
-                      "rpcs": [], "unique": [], "failures": [], "timeouts": [], "recalls_all": []}
+    run_data = {ttl: {"recalls": [], "latencies": [], "all_lats": [],
+                      "rpcs": [], "unique": [], "failures": [], "timeouts": [],
+                      "incomplete": [], "recalls_all": []}
                 for ttl in TTL_VALUES}
 
     for run_id in range(NUM_RUNS):
@@ -135,7 +136,7 @@ def run_evaluation():
         for ttl in TTL_VALUES:
             print(f"Run {run_id + 1}/{NUM_RUNS} | TTL={ttl} ({NUM_QUERIES} Queries)...")
             q_recalls, q_lats, q_rpcs, q_unique = [], [], [], []
-            q_failures, q_timeouts = 0, 0
+            q_failures, q_timeouts, q_incomplete = 0, 0, 0
 
             for i, query_vector in enumerate(run_queries):
                 request = make_request(query_vector, K, ttl, fanout_k, early_stop_threshold)
@@ -143,7 +144,10 @@ def run_evaluation():
                     t0 = time.time()
                     response = stubs[entry_nodes[i]].SearchSimilar(request, timeout=10.0)
                     q_lats.append((time.time() - t0) * 1000)
-                    matches = len(set(response.vector_ids[:K]) & run_true_ids[i])
+                    returned_ids = set(response.vector_ids[:K])
+                    if len(returned_ids) < K:
+                        q_incomplete += 1
+                    matches = len(returned_ids & run_true_ids[i])
                     q_recalls.append(matches / K)
                     q_rpcs.append(response.rpc_count)
                     q_unique.append(len(response.visited_nodes))
@@ -162,13 +166,12 @@ def run_evaluation():
             rd = run_data[ttl]
             rd["failures"].append(q_failures)
             rd["timeouts"].append(q_timeouts)
+            rd["incomplete"].append(q_incomplete)
             rd["recalls_all"].append(sum(q_recalls) / NUM_QUERIES)
             if q_recalls:
                 rd["recalls"].append(np.mean(q_recalls))
                 rd["latencies"].append(np.mean(q_lats))
-                rd["p50_lats"].append(np.percentile(q_lats, 50))
-                rd["p95_lats"].append(np.percentile(q_lats, 95))
-                rd["p99_lats"].append(np.percentile(q_lats, 99))
+                rd["all_lats"].extend(q_lats)
                 rd["rpcs"].append(np.mean(q_rpcs))
                 rd["unique"].append(np.mean(q_unique))
 
@@ -181,8 +184,9 @@ def run_evaluation():
         n_all = len(rd["recalls_all"])
         if not n_all:
             continue
-        avg_failure_rate = np.mean(rd["failures"]) / NUM_QUERIES
-        avg_timeout_rate = np.mean(rd["timeouts"]) / NUM_QUERIES
+        avg_failure_rate    = np.mean(rd["failures"])    / NUM_QUERIES
+        avg_timeout_rate    = np.mean(rd["timeouts"])    / NUM_QUERIES
+        avg_incomplete_rate = np.mean(rd["incomplete"])  / NUM_QUERIES
 
         recalls_all    = rd["recalls_all"]
         avg_recall_all = np.mean(recalls_all) * 100
@@ -199,9 +203,10 @@ def run_evaluation():
         if n_succ > 0:
             avg_recall  = np.mean(run_recalls) * 100
             avg_lat     = np.mean(rd["latencies"])
-            avg_p50_lat = np.mean(rd["p50_lats"])
-            avg_p95_lat = np.mean(rd["p95_lats"])
-            avg_p99_lat = np.mean(rd["p99_lats"])
+            all_lats    = rd["all_lats"]
+            avg_p50_lat = float(np.percentile(all_lats, 50))
+            avg_p95_lat = float(np.percentile(all_lats, 95))
+            avg_p99_lat = float(np.percentile(all_lats, 99))
             avg_rpcs    = np.mean(rd["rpcs"])
             avg_unique  = np.mean(rd["unique"])
             if n_succ >= 2:
@@ -223,6 +228,7 @@ def run_evaluation():
               f"recall_all={avg_recall_all:.2f}% [{ci_all_lo:.2f}, {ci_all_hi:.2f}]  "
               f"recall_ok={avg_recall:.2f}%  "
               f"fail={avg_failure_rate:.1%}  timeout={avg_timeout_rate:.1%}  "
+              f"incomplete={avg_incomplete_rate:.1%}  "
               f"{avg_lat:.1f} [{lat_ci_lo:.1f}, {lat_ci_hi:.1f}] ms  "
               f"p50={avg_p50_lat:.1f}  p95={avg_p95_lat:.1f}  p99={avg_p99_lat:.1f} ms  "
               f"rpcs={avg_rpcs:.0f}  unique={avg_unique:.1f}  "
@@ -232,6 +238,7 @@ def run_evaluation():
             "n_runs":                      n_all,
             "failure_rate":                round(avg_failure_rate, 6),
             "timeout_rate":                round(avg_timeout_rate, 6),
+            "incomplete_rate":             round(avg_incomplete_rate, 6),
             "recall_over_all_mean":        round(avg_recall_all, 4),
             "recall_over_all_ci95_low":    round(ci_all_lo, 4),
             "recall_over_all_ci95_high":   round(ci_all_hi, 4),

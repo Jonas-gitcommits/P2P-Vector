@@ -172,16 +172,22 @@ class DistributedRouter:
                 break
 
             best_score = candidates[0][0]
-            top_k_sorted = sorted(global_top, key=lambda x: x[2])[:k]
+            seen_conv = set()
+            top_k_deduped = []
+            for item in sorted(global_top, key=lambda x: x[2]):
+                if item[3] not in seen_conv:
+                    seen_conv.add(item[3])
+                    top_k_deduped.append(item)
+                if len(top_k_deduped) == k:
+                    break
             if (len(queried) >= ROUTING_EF
-                    and len(top_k_sorted) >= k
-                    and best_score >= top_k_sorted[k - 1][2]):
+                    and len(top_k_deduped) >= k
+                    and best_score >= top_k_deduped[k - 1][2]):
                 break
 
             batch = [t for _, t in candidates[:ROUTING_ALPHA]]
             queried.update(batch)
             visited_nodes.update(batch)
-            rpc_count += len(batch)
 
             for t in batch:
                 if t not in first_hop_neighbors:
@@ -193,6 +199,7 @@ class DistributedRouter:
             for result in results:
                 if result is None or isinstance(result, Exception):
                     continue
+                rpc_count += 1
                 global_top.extend(result["peers"])
                 for nb_target, nb_summary in result["neighbor_summaries"].items():
                     if nb_target in queried or nb_target == my_id:
@@ -249,20 +256,28 @@ class DistributedRouter:
     async def health_check_loop(self, local_graph):
         while True:
             await asyncio.sleep(HEALTH_CHECK_INTERVAL_S)
-            dead_targets = []
 
-            for target in list(local_graph.neighbors.keys()):
+            targets = list(local_graph.neighbors.keys())
+
+            async def _ping_one(target):
                 channel = self._get_channel(target)
                 stub = p2p_pb2_grpc.VectorStoreStub(channel)
-
                 try:
                     response = await stub.Ping(p2p_pb2.PingRequest(), timeout=PING_TIMEOUT_S)
-                    if response.summary_count > 0 and response.summary:
-                        local_graph.neighbors[target] = np.frombuffer(
-                            response.summary, dtype=np.float32
-                        ).reshape(response.summary_count, -1).copy()
+                    return target, response
                 except grpc.RpcError:
+                    return target, None
+
+            results = await asyncio.gather(*[_ping_one(t) for t in targets])
+
+            dead_targets = []
+            for target, response in results:
+                if response is None:
                     dead_targets.append(target)
+                elif response.summary_count > 0 and response.summary:
+                    local_graph.neighbors[target] = np.frombuffer(
+                        response.summary, dtype=np.float32
+                    ).reshape(response.summary_count, -1).copy()
 
             for target in dead_targets:
                 if target in local_graph.neighbors:
