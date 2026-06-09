@@ -9,7 +9,7 @@ from config import (
     TOXIPROXY_ENABLED, REAL_PORT_START, PROXY_PORT_START,
     FAULT_INJECTION_ENABLED, FAULT_KILL_INTERVAL, FAULT_KILL_PROBABILITY,
     FAULT_MAX_DOWN, FAULT_RESTART_DELAY, FAULT_SEED,
-    LATENCY_SCENARIO,
+    LATENCY_SCENARIO, SEED,
 )
 
 processes = []
@@ -25,7 +25,7 @@ def _make_cmd(i: int) -> list:
         bootstrap_str = "None"
     else:
         bootstrap_str = str(PROXY_PORT_START if TOXIPROXY_ENABLED else REAL_PORT_START)
-    return [sys.executable, "node.py", str(real_port), bootstrap_str, str(i), str(proxy_port)]
+    return [sys.executable, "node.py", str(real_port), bootstrap_str, str(i), str(proxy_port), str(SEED + i)]
 
 
 def start_network():
@@ -38,10 +38,10 @@ def start_network():
     time.sleep(3)
 
     if TOXIPROXY_ENABLED:
-        from chaos.toxiproxy_setup import setup_proxies, apply_latency_scenario, add_packet_loss
+        from chaos.toxiproxy_setup import setup_proxies, apply_latency_scenario, add_connection_drops
         setup_proxies(NUM_NODES)
         apply_latency_scenario(NUM_NODES, LATENCY_SCENARIO)
-        add_packet_loss(NUM_NODES)
+        add_connection_drops(NUM_NODES)
 
     if FAULT_INJECTION_ENABLED:
         _start_chaos_loop()
@@ -73,7 +73,7 @@ def _stop_chaos_loop():
 def _chaos_worker():
     rng = random.Random(FAULT_SEED)
     
-    down: dict = {}
+    down = {}
 
     while not _chaos_stop.is_set():
         _chaos_stop.wait(FAULT_KILL_INTERVAL)

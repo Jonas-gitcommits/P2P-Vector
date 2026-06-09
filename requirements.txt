@@ -1,0 +1,9 @@
+grpcio
+grpcio-tools
+numpy
+faiss-cpu
+scipy
+matplotlib
+pandas
+datasets
+sentence-transformers

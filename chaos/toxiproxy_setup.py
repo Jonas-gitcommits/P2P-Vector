@@ -5,7 +5,7 @@ import urllib.error
 from config import (
     TOXIPROXY_HOST, TOXIPROXY_API_PORT,
     REAL_PORT_START, PROXY_PORT_START,
-    TOXIC_LATENCY_MS, TOXIC_LATENCY_JITTER_MS, TOXIC_PACKET_LOSS_PCT,
+    TOXIC_CONN_DROP_PCT, LATENCY_PRESETS,
 )
 
 _BASE = f"http://{TOXIPROXY_HOST}:{TOXIPROXY_API_PORT}"
@@ -36,9 +36,6 @@ def _api(method: str, path: str, body=None):
         ) from None
 
 
-def proxy_address(i: int) -> str:
-    return f"{TOXIPROXY_HOST}:{PROXY_PORT_START + i}"
-
 
 def setup_proxies(num_nodes: int):
     for i in range(num_nodes):
@@ -62,29 +59,9 @@ def setup_proxies(num_nodes: int):
         )
 
 
-def add_latency_toxic(num_nodes: int):
-    for i in range(num_nodes):
-        name = f"node_{i}"
-        _api("POST", f"/proxies/{name}/toxics", {
-            "name": "latency_downstream",
-            "type": "latency",
-            "stream": "downstream",
-            "toxicity": 1.0,
-            "attributes": {
-                "latency": TOXIC_LATENCY_MS,
-                "jitter": TOXIC_LATENCY_JITTER_MS,
-            },
-        })
-        print(
-            f"[Toxiproxy] Latenz-Toxic auf {name}: "
-            f"{TOXIC_LATENCY_MS}±{TOXIC_LATENCY_JITTER_MS} ms (downstream)"
-        )
-
-
 def apply_latency_scenario(num_nodes: int, scenario: str):
     """Entfernt vorhandene latency-toxics und setzt sie fürs Szenario neu.
     loss-toxics bleiben unberührt. Zur Laufzeit aufrufbar."""
-    from config import LATENCY_PRESETS
     if scenario not in LATENCY_PRESETS:
         raise ValueError(f"Unbekanntes Szenario: {scenario}")
     latency_ms, jitter_ms = LATENCY_PRESETS[scenario]
@@ -107,10 +84,10 @@ def apply_latency_scenario(num_nodes: int, scenario: str):
     print(f"[Toxiproxy] '{scenario}': {latency_ms}±{jitter_ms} ms auf {num_nodes} Proxies")
 
 
-def add_packet_loss(num_nodes: int):
-    if TOXIC_PACKET_LOSS_PCT <= 0:
+def add_connection_drops(num_nodes: int):
+    if TOXIC_CONN_DROP_PCT <= 0:
         return
-    toxicity = TOXIC_PACKET_LOSS_PCT / 100.0
+    toxicity = TOXIC_CONN_DROP_PCT / 100.0
     for i in range(num_nodes):
         name = f"node_{i}"
         _api("POST", f"/proxies/{name}/toxics", {
@@ -121,8 +98,8 @@ def add_packet_loss(num_nodes: int):
             "attributes": {"bytes": 1},
         })
         print(
-            f"[Toxiproxy] Loss-Toxic auf {name}: "
-            f"{TOXIC_PACKET_LOSS_PCT}% Verbindungsabbrüche (downstream)"
+            f"[Toxiproxy] Verbindungsabbruch-Toxic auf {name}: "
+            f"{TOXIC_CONN_DROP_PCT}% Verbindungsabbrüche (limit_data, 1 Byte, downstream)"
         )
 
 

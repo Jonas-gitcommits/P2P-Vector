@@ -5,6 +5,7 @@ package p2pvector;
 service VectorStore {
   rpc SearchSimilar (SearchRequest) returns (SearchResponse) {}
   rpc Ping (PingRequest) returns (PingResponse) {}
+  rpc QueryNode (QueryNodeRequest) returns (QueryNodeResponse) {}
 }
 
 message Vector {
@@ -33,6 +34,7 @@ message SearchResponse {
   repeated float distances = 2;
   int32 rpc_count = 3;
   repeated string visited_nodes = 4;
+  repeated int64 vector_ids = 5;
 }
 
 message PingRequest {
@@ -42,4 +44,24 @@ message PingRequest {
 message PingResponse {
   bool alive = 1;
   int32 neighbor_count = 2;
+  bytes summary = 3;
+  int32 summary_count = 4;
+}
+
+message QueryNodeRequest {
+  Vector query = 1;
+  int32 k = 2;
+}
+
+message NeighborInfo {
+  string target = 1;
+  bytes summary = 2;
+  int32 summary_count = 3;
+}
+
+message QueryNodeResponse {
+  repeated Peer nearest_peers = 1;
+  repeated float distances = 2;
+  repeated int64 vector_ids = 3;
+  repeated NeighborInfo neighbors = 4;
 }
