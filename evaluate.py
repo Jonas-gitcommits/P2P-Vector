@@ -17,7 +17,7 @@ def _t_crit(n):
 
 def build_ground_truth_ids(dataset, queries, subset_size, k, dimension, dataset_name):
     import hashlib
-    h = hashlib.md5(dataset[:subset_size].tobytes()).hexdigest()[:8]
+    h = hashlib.md5(dataset[:subset_size].tobytes() + queries.tobytes()).hexdigest()[:8]
     cache_file = f"gt_cache_{dataset_name}_size{subset_size}_k{k}_{h}.pkl"
     if os.path.exists(cache_file):
         print(f"  [Cache] Lade Ground-Truth aus {cache_file}...")
@@ -80,6 +80,7 @@ def run_evaluation():
         TOXIPROXY_ENABLED, PROXY_PORT_START, REAL_PORT_START,
         NUM_QUERIES, NUM_RUNS, K, TTL_VALUES, DIMENSION, GOSSIP_WARMUP_S,
         DATASET, LATENCY_SCENARIO, SEED, ROUTING_STRATEGY,
+        FAULT_INJECTION_ENABLED, FAULT_MAX_DOWN,
     )
 
     early_stop_threshold = EARLY_STOP_THRESHOLD if EARLY_STOP_ENABLED else 0.0
@@ -96,6 +97,23 @@ def run_evaluation():
     print("Berechne Ground-Truth-IDs...")
     true_ids_all = build_ground_truth_ids(dataset, all_queries, SUBSET_SIZE, K, DIMENSION, DATASET)
     print(f"  Fertig: {len(true_ids_all)} Referenzmengen.\n")
+
+    required = NUM_NODES - (FAULT_MAX_DOWN if FAULT_INJECTION_ENABLED else 0)
+    ready_deadline = 180.0
+    ready_start = time.time()
+    while True:
+        alive = get_alive_nodes(all_nodes)
+        ready_wait_s = time.time() - ready_start
+        if len(alive) >= required:
+            print(f"Readiness erreicht: {len(alive)}/{NUM_NODES} "
+                  f"(benötigt {required}) nach {ready_wait_s:.1f}s.")
+            break
+        if ready_wait_s >= ready_deadline:
+            print(f"WARNUNG: Readiness-Deadline ({ready_deadline}s) überschritten — "
+                  f"nur {len(alive)}/{NUM_NODES} erreichbar (benötigt {required}). "
+                  f"Fahre trotzdem fort.")
+            break
+        time.sleep(2)
 
     if GOSSIP_WARMUP_S > 0:
         print(f"Warte {GOSSIP_WARMUP_S}s für Gossip-Konvergenz...")
@@ -253,6 +271,8 @@ def run_evaluation():
             "latency_p99_ms":              round(avg_p99_lat, 4),
             "rpc_count_mean":              round(avg_rpcs, 2),
             "unique_nodes_mean":           round(avg_unique, 2),
+            "alive_count":                 len(alive_nodes),
+            "ready_wait_s":                round(ready_wait_s, 1),
         })
     return rows
 

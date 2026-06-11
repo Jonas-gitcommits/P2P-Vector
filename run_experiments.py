@@ -238,6 +238,8 @@ def _aggregate(run_rows):
         rci_lo,  rci_hi  = _ci(recalls,    0.0, 100.0)
         roci_lo, roci_hi = _ci(recalls_ok, 0.0, 100.0)
         lci_lo,  lci_hi  = _ci(lats)
+        alive_vals = [float(r["alive_count"]) for r in rows if r.get("alive_count") is not None]
+        wait_vals  = [float(r["ready_wait_s"]) for r in rows if r.get("ready_wait_s") is not None]
         result.append({
             "ttl":                         ttl,
             "n_runs":                      len(rows),
@@ -257,6 +259,8 @@ def _aggregate(run_rows):
             "latency_p99_ms":              _mean(rows, "latency_p99_ms"),
             "rpc_count_mean":              round(float(np.nanmean([float(r["rpc_count_mean"])    for r in rows])), 2),
             "unique_nodes_mean":           round(float(np.nanmean([float(r["unique_nodes_mean"]) for r in rows])), 2),
+            "alive_count_min":             int(min(alive_vals)) if alive_vals else None,
+            "ready_wait_s_max":            round(max(wait_vals), 1) if wait_vals else None,
         })
     return result
 

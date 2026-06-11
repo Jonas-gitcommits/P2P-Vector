@@ -15,11 +15,20 @@ class LocalGraphState:
         self.global_ids = []
         self.neighbors = {}
         self.rng = rng or random.Random()
+        self._summary_cache = None
+        self._summary_lock = asyncio.Lock()
 
     async def insert_local(self, vector, global_id):
         vec_np = np.array([vector], dtype=np.float32)
         await asyncio.to_thread(self.local_index.add, vec_np)
         self.global_ids.append(global_id)
+        self._summary_cache = None
+
+    async def insert_batch(self, vectors, global_ids):
+        arr = np.ascontiguousarray(vectors, dtype=np.float32)
+        await asyncio.to_thread(self.local_index.add, arr)
+        self.global_ids.extend(int(g) for g in global_ids)
+        self._summary_cache = None
 
     async def search_local(self, query_vector, k, my_ip, my_port):
         if self.local_index.ntotal == 0:
@@ -35,20 +44,25 @@ class LocalGraphState:
         return results[:k]
 
     async def compute_summary(self, R=8):
-        n = self.local_index.ntotal
-        if n == 0:
-            return b"", 0
+        async with self._summary_lock:
+            if self._summary_cache is not None:
+                return self._summary_cache
 
-        def _run():
-            vecs = self.local_index.reconstruct_n(0, n).astype(np.float32)
-            if n < R:
-                centroid = vecs.mean(axis=0, keepdims=True).astype(np.float32)
-                return centroid.tobytes(), 1
-            kmeans = faiss.Kmeans(self.dimension, R, niter=20, verbose=False)
-            kmeans.train(vecs)
-            return kmeans.centroids.astype(np.float32).tobytes(), R
+            n = self.local_index.ntotal
+            if n == 0:
+                return b"", 0
 
-        return await asyncio.to_thread(_run)
+            def _run():
+                vecs = self.local_index.reconstruct_n(0, n).astype(np.float32)
+                if n < R:
+                    centroid = vecs.mean(axis=0, keepdims=True).astype(np.float32)
+                    return centroid.tobytes(), 1
+                kmeans = faiss.Kmeans(self.dimension, R, niter=20, verbose=False)
+                kmeans.train(vecs)
+                return kmeans.centroids.astype(np.float32).tobytes(), R
+
+            self._summary_cache = await asyncio.to_thread(_run)
+            return self._summary_cache
 
     async def get_my_latest_vector(self):
         if self.local_index.ntotal == 0:
@@ -209,20 +223,18 @@ async def serve(real_port, bootstrap_port=None, node_id=0, proxy_port=None, seed
 
     try:
         from config import VECTORS_PER_NODE, NUM_NODES, REPLICATION, PLACEMENT
-        dataset = np.load("dataset.npy")
+        dataset = np.load("dataset.npy", mmap_mode="r")
 
         if PLACEMENT == 'clustered':
             partition = np.load("partition.npy")
             my_ids = np.where(partition == node_id)[0]
-            for gid in my_ids:
-                await local_graph.insert_local(dataset[gid].tolist(), int(gid))
+            await local_graph.insert_batch(dataset[my_ids], my_ids.tolist())
             print(f"[Node {proxy_port}] ID {node_id}: {len(my_ids)} Vektoren geladen (clustered).")
 
             if REPLICATION:
                 replica_id = (node_id + 1) % NUM_NODES
                 replica_ids = np.where(partition == replica_id)[0]
-                for gid in replica_ids:
-                    await local_graph.insert_local(dataset[gid].tolist(), int(gid))
+                await local_graph.insert_batch(dataset[replica_ids], replica_ids.tolist())
                 print(f"[Node {proxy_port}] Replikat von ID {replica_id}: "
                       f"{len(replica_ids)} Vektoren geladen.")
         else:
@@ -234,16 +246,17 @@ async def serve(real_port, bootstrap_port=None, node_id=0, proxy_port=None, seed
                     "Bitte `python generate_data.py` erneut ausführen."
                 )
             my_chunk = dataset[start_idx:start_idx + chunk_size]
-            for j, vec in enumerate(my_chunk):
-                await local_graph.insert_local(vec.tolist(), start_idx + j)
+            await local_graph.insert_batch(
+                my_chunk, list(range(start_idx, start_idx + len(my_chunk))))
             print(f"[Node {proxy_port}] ID {node_id}: {len(my_chunk)} Vektoren geladen (contiguous).")
 
             if REPLICATION:
                 replica_id = (node_id + 1) % NUM_NODES
                 replica_start = replica_id * chunk_size
                 replica_chunk = dataset[replica_start:replica_start + chunk_size]
-                for j, vec in enumerate(replica_chunk):
-                    await local_graph.insert_local(vec.tolist(), replica_start + j)
+                await local_graph.insert_batch(
+                    replica_chunk,
+                    list(range(replica_start, replica_start + len(replica_chunk))))
                 print(f"[Node {proxy_port}] Replikat von ID {replica_id}: "
                       f"{len(replica_chunk)} Vektoren geladen.")
     except FileNotFoundError as e:
