@@ -79,7 +79,7 @@ def run_evaluation():
         NUM_NODES, SUBSET_SIZE, EARLY_STOP_ENABLED, EARLY_STOP_THRESHOLD,
         TOXIPROXY_ENABLED, PROXY_PORT_START, REAL_PORT_START,
         NUM_QUERIES, NUM_RUNS, K, TTL_VALUES, DIMENSION, GOSSIP_WARMUP_S,
-        DATASET, LATENCY_SCENARIO, SEED, ROUTING_STRATEGY,
+        DATASET, LATENCY_SCENARIO, LATENCY_PRESETS, SEED, ROUTING_STRATEGY,
         FAULT_INJECTION_ENABLED, FAULT_MAX_DOWN,
     )
 
@@ -139,6 +139,7 @@ def run_evaluation():
               f"(min={min(nb_counts)}, max={max(nb_counts)})")
 
     fanout_k = max(K * 4, 20)
+    lat_ms, jitter_ms = LATENCY_PRESETS.get(LATENCY_SCENARIO, (0, 0))
     run_data = {ttl: {"recalls": [], "latencies": [], "all_lats": [],
                       "rpcs": [], "unique": [], "failures": [], "timeouts": [],
                       "incomplete": [], "recalls_all": []}
@@ -160,7 +161,8 @@ def run_evaluation():
                 request = make_request(query_vector, K, ttl, fanout_k, early_stop_threshold)
                 try:
                     t0 = time.time()
-                    response = stubs[entry_nodes[i]].SearchSimilar(request, timeout=10.0)
+                    response = stubs[entry_nodes[i]].SearchSimilar(
+                        request, timeout=10.0 + ttl * 2 * (lat_ms + jitter_ms) / 1000)
                     q_lats.append((time.time() - t0) * 1000)
                     returned_ids = set(response.vector_ids[:K])
                     if len(returned_ids) < K:
@@ -273,6 +275,7 @@ def run_evaluation():
             "unique_nodes_mean":           round(avg_unique, 2),
             "alive_count":                 len(alive_nodes),
             "ready_wait_s":                round(ready_wait_s, 1),
+            "_lat_samples":                list(rd["all_lats"]),
         })
     return rows
 

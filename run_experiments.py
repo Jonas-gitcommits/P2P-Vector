@@ -151,7 +151,7 @@ def stop_toxiproxy():
 
 def start_network(n):
     global _sim_proc
-    subprocess.run(["pkill", "-f", "node.py"], stderr=subprocess.DEVNULL)
+    subprocess.run(["pkill", "-f", "node\\.py.*P2PVEC_MARKER"], stderr=subprocess.DEVNULL)
     time.sleep(1)
     _sim_proc = subprocess.Popen([PY, "simulator.py"], cwd=HERE, start_new_session=True)
     time.sleep(P["NETWORK_BOOT_WAIT"] + 0.05 * n)
@@ -170,7 +170,7 @@ def stop_network():
         except Exception:
             pass
     _sim_proc = None
-    subprocess.run(["pkill", "-f", "node.py"], stderr=subprocess.DEVNULL)
+    subprocess.run(["pkill", "-f", "node\\.py.*P2PVEC_MARKER"], stderr=subprocess.DEVNULL)
     time.sleep(PORT_RELEASE_WAIT)
 
 def generate_data():
@@ -240,6 +240,17 @@ def _aggregate(run_rows):
         lci_lo,  lci_hi  = _ci(lats)
         alive_vals = [float(r["alive_count"]) for r in rows if r.get("alive_count") is not None]
         wait_vals  = [float(r["ready_wait_s"]) for r in rows if r.get("ready_wait_s") is not None]
+        lat_pool = []
+        for r in rows:
+            lat_pool.extend(r.get("_lat_samples") or [])
+        if lat_pool:
+            p50 = round(float(np.percentile(lat_pool, 50)), 4)
+            p95 = round(float(np.percentile(lat_pool, 95)), 4)
+            p99 = round(float(np.percentile(lat_pool, 99)), 4)
+        else:
+            p50 = _mean(rows, "latency_p50_ms")
+            p95 = _mean(rows, "latency_p95_ms")
+            p99 = _mean(rows, "latency_p99_ms")
         result.append({
             "ttl":                         ttl,
             "n_runs":                      len(rows),
@@ -254,9 +265,9 @@ def _aggregate(run_rows):
             "latency_mean_ms":             round(float(np.mean(lats)), 4),
             "latency_ci95_low":            lci_lo,
             "latency_ci95_high":           lci_hi,
-            "latency_p50_ms":              _mean(rows, "latency_p50_ms"),
-            "latency_p95_ms":              _mean(rows, "latency_p95_ms"),
-            "latency_p99_ms":              _mean(rows, "latency_p99_ms"),
+            "latency_p50_ms":              p50,
+            "latency_p95_ms":              p95,
+            "latency_p99_ms":              p99,
             "rpc_count_mean":              round(float(np.nanmean([float(r["rpc_count_mean"])    for r in rows])), 2),
             "unique_nodes_mean":           round(float(np.nanmean([float(r["unique_nodes_mean"]) for r in rows])), 2),
             "alive_count_min":             int(min(alive_vals)) if alive_vals else None,

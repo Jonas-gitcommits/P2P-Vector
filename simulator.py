@@ -25,7 +25,7 @@ def _make_cmd(i: int) -> list:
         bootstrap_str = "None"
     else:
         bootstrap_str = str(PROXY_PORT_START if TOXIPROXY_ENABLED else REAL_PORT_START)
-    return [sys.executable, "node.py", str(real_port), bootstrap_str, str(i), str(proxy_port), str(SEED + i)]
+    return [sys.executable, "node.py", str(real_port), bootstrap_str, str(i), str(proxy_port), str(SEED + i), "P2PVEC_MARKER"]
 
 
 def start_network():
@@ -72,11 +72,12 @@ def _stop_chaos_loop():
 
 def _chaos_worker():
     rng = random.Random(FAULT_SEED)
-    
+
     down = {}
+    last_kill_check = time.time()
 
     while not _chaos_stop.is_set():
-        _chaos_stop.wait(FAULT_KILL_INTERVAL)
+        _chaos_stop.wait(1.0)
         if _chaos_stop.is_set():
             break
 
@@ -84,12 +85,25 @@ def _chaos_worker():
 
         for idx in [k for k, (t, _) in down.items() if now - t >= FAULT_RESTART_DELAY]:
             _, cmd = down.pop(idx)
-            new_proc = subprocess.Popen(cmd)
+            alive_ids = [i for i in range(NUM_NODES) if i not in down and i != idx]
+            if alive_ids:
+                b = rng.choice(alive_ids)
+                bootstrap_port = (PROXY_PORT_START + b) if TOXIPROXY_ENABLED else (REAL_PORT_START + b)
+                new_cmd = list(cmd)
+                new_cmd[3] = str(bootstrap_port)
+            else:
+                bootstrap_port = None
+                new_cmd = cmd
+            new_proc = subprocess.Popen(new_cmd)
             processes[idx] = [new_proc, cmd]
             print(
                 f"[{time.strftime('%H:%M:%S')}] [Chaos] Neustart Knoten {idx} "
-                f"(Real-Port {REAL_PORT_START + idx})"
+                f"(Real-Port {REAL_PORT_START + idx}, Bootstrap-Port {bootstrap_port})"
             )
+
+        if now - last_kill_check < FAULT_KILL_INTERVAL:
+            continue
+        last_kill_check = now
 
         if len(down) < FAULT_MAX_DOWN and rng.random() < FAULT_KILL_PROBABILITY:
             candidates = [i for i in range(NUM_NODES) if i not in down]

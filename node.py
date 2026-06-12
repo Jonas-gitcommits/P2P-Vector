@@ -6,12 +6,13 @@ import numpy as np
 import faiss
 import random
 import sys
-from config import HNSW_M, DIMENSION, ROUTING_STRATEGY, EARLY_STOP_ENABLED, EARLY_STOP_THRESHOLD
+from config import HNSW_M, DIMENSION, ROUTING_STRATEGY
 
 class LocalGraphState:
     def __init__(self, dimension=DIMENSION, M=HNSW_M, rng=None):
         self.dimension = dimension
         self.local_index = faiss.IndexHNSWFlat(dimension, M)
+        self.local_index.hnsw.efSearch = 64
         self.global_ids = []
         self.neighbors = {}
         self.rng = rng or random.Random()
@@ -64,12 +65,6 @@ class LocalGraphState:
             self._summary_cache = await asyncio.to_thread(_run)
             return self._summary_cache
 
-    async def get_my_latest_vector(self):
-        if self.local_index.ntotal == 0:
-            return [0.0] * self.dimension
-        idx = self.rng.randint(0, self.local_index.ntotal - 1)
-        return (await asyncio.to_thread(self.local_index.reconstruct, idx)).tolist()
-
     def evaluate_next_hop(self, query_vector, visited_peers, fanout=2):
         visited_set = set(visited_peers)
         unvisited = [t for t in self.neighbors if t not in visited_set]
@@ -84,6 +79,9 @@ class LocalGraphState:
             return {"action": "hop",
                     "targets": self.rng.sample(unvisited, min(fanout, len(unvisited)))}
 
+        # Greedy-Default: greift auch unter ROUTING_STRATEGY == 'iterative'.
+        # Iterative Entry-Suchen laufen über DistributedRouter.iterative_search;
+        # hier landen nur interne Weiterleitungen (z.B. Gossip-Probes mit ttl=1).
         query_np = np.array(query_vector, dtype=np.float32)
 
         def _dist(t):
@@ -145,8 +143,8 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
         rpc_count = 1
         visited_nodes = {my_id}
 
-        _skip_forward = (EARLY_STOP_ENABLED and bool(local_res)
-                         and local_res[0][2] <= EARLY_STOP_THRESHOLD)
+        _skip_forward = (request.early_stop_threshold > 0 and bool(local_res)
+                         and local_res[0][2] <= request.early_stop_threshold)
 
         if request.ttl > 0 and not _skip_forward:
             remote_result = await self.router.distributed_search(

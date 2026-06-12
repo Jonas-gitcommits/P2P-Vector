@@ -43,7 +43,8 @@ class DistributedRouter:
         )
 
         lat_ms, jitter_ms = LATENCY_PRESETS.get(LATENCY_SCENARIO, (0, 0))
-        timeout = ttl * (lat_ms + jitter_ms) / 1000 + RPC_TIMEOUT_BASE_S
+        per_hop = 2 * (lat_ms + jitter_ms) / 1000 + 0.1
+        timeout = RPC_TIMEOUT_BASE_S + ttl * per_hop
 
         try:
             response = await stub.SearchSimilar(request, timeout=timeout)
@@ -121,8 +122,10 @@ class DistributedRouter:
             query=p2p_pb2.Vector(values=query_bytes),
             k=k,
         )
+        lat_ms, jitter_ms = LATENCY_PRESETS.get(LATENCY_SCENARIO, (0, 0))
+        timeout = RPC_TIMEOUT_BASE_S + 2 * (lat_ms + jitter_ms) / 1000
         try:
-            response = await stub.QueryNode(request, timeout=RPC_TIMEOUT_BASE_S)
+            response = await stub.QueryNode(request, timeout=timeout)
             peers = [
                 (p.ip, p.port, d, gid)
                 for p, d, gid in zip(
@@ -187,19 +190,17 @@ class DistributedRouter:
 
             batch = [t for _, t in candidates[:ROUTING_ALPHA]]
             queried.update(batch)
-            visited_nodes.update(batch)
-
-            for t in batch:
-                if t not in first_hop_neighbors:
-                    non_first_hop_count += 1
 
             tasks = [self.query_node(t, query_vector, k) for t in batch]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            for result in results:
+            for target, result in zip(batch, results):
                 if result is None or isinstance(result, Exception):
                     continue
                 rpc_count += 1
+                visited_nodes.add(target)
+                if target not in first_hop_neighbors:
+                    non_first_hop_count += 1
                 global_top.extend(result["peers"])
                 for nb_target, nb_summary in result["neighbor_summaries"].items():
                     if nb_target in queried or nb_target == my_id:
