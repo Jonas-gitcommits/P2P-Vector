@@ -21,12 +21,6 @@ class LocalGraphState:
         self._summary_cache = None
         self._summary_lock = asyncio.Lock()
 
-    async def insert_local(self, vector, global_id):
-        vec_np = np.array([vector], dtype=np.float32)
-        await asyncio.to_thread(self.local_index.add, vec_np)
-        self.global_ids.append(global_id)
-        self._summary_cache = None
-
     async def insert_batch(self, vectors, global_ids):
         arr = np.ascontiguousarray(vectors, dtype=np.float32)
         await asyncio.to_thread(self.local_index.add, arr)

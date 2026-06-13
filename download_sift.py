@@ -20,7 +20,7 @@ def download():
     print("Lade SIFT1M herunter...")
     try:
         urllib.request.urlretrieve(SIFT_URL, archive_path)
-    except Exception as e:
+    except Exception:
         urllib.request.urlretrieve(SIFT_HTTP_MIRROR, archive_path)
 
     print("Entpacke...")
