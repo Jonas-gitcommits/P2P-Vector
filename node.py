@@ -11,10 +11,12 @@ from config import HNSW_M, DIMENSION, ROUTING_STRATEGY
 class LocalGraphState:
     def __init__(self, dimension=DIMENSION, M=HNSW_M, rng=None):
         self.dimension = dimension
+        # Angelehnt an [malkov2020hnsw], [douze2024faiss].
         self.local_index = faiss.IndexHNSWFlat(dimension, M)
         self.local_index.hnsw.efSearch = 64
         self.global_ids = []
         self.neighbors = {}
+        self.bootstrap_seeds = []
         self.rng = rng or random.Random()
         self._summary_cache = None
         self._summary_lock = asyncio.Lock()
@@ -44,6 +46,7 @@ class LocalGraphState:
         results.sort(key=lambda x: x[2])
         return results[:k]
 
+    # Angelehnt an [jegou2011pq].
     async def compute_summary(self, R=8):
         async with self._summary_lock:
             if self._summary_cache is not None:
@@ -72,16 +75,16 @@ class LocalGraphState:
         if not unvisited:
             return {"action": "stop", "targets": []}
 
+        # Angelehnt an [lv2002search].
         if ROUTING_STRATEGY == 'flood':
             return {"action": "hop", "targets": unvisited}
 
+        # Angelehnt an [lv2002search].
         if ROUTING_STRATEGY == 'random':
             return {"action": "hop",
                     "targets": self.rng.sample(unvisited, min(fanout, len(unvisited)))}
 
-        # Greedy-Default: greift auch unter ROUTING_STRATEGY == 'iterative'.
-        # Iterative Entry-Suchen laufen über DistributedRouter.iterative_search;
-        # hier landen nur interne Weiterleitungen (z.B. Gossip-Probes mit ttl=1).
+        # Angelehnt an [malkov2020hnsw].
         query_np = np.array(query_vector, dtype=np.float32)
 
         def _dist(t):
@@ -229,6 +232,7 @@ async def serve(real_port, bootstrap_port=None, node_id=0, proxy_port=None, seed
             await local_graph.insert_batch(dataset[my_ids], my_ids.tolist())
             print(f"[Node {proxy_port}] ID {node_id}: {len(my_ids)} Vektoren geladen (clustered).")
 
+            # Angelehnt an [stoica2001chord].
             if REPLICATION:
                 replica_id = (node_id + 1) % NUM_NODES
                 replica_ids = np.where(partition == replica_id)[0]
@@ -248,6 +252,7 @@ async def serve(real_port, bootstrap_port=None, node_id=0, proxy_port=None, seed
                 my_chunk, list(range(start_idx, start_idx + len(my_chunk))))
             print(f"[Node {proxy_port}] ID {node_id}: {len(my_chunk)} Vektoren geladen (contiguous).")
 
+            # Angelehnt an [stoica2001chord].
             if REPLICATION:
                 replica_id = (node_id + 1) % NUM_NODES
                 replica_start = replica_id * chunk_size
@@ -260,13 +265,16 @@ async def serve(real_port, bootstrap_port=None, node_id=0, proxy_port=None, seed
     except FileNotFoundError as e:
         print(f"[Node {proxy_port}] Fehler: {e}")
 
+    # Angelehnt an [stoica2001chord], [maymounkov2002kademlia].
     if bootstrap_port and bootstrap_port != "None":
         local_graph.add_neighbor_edge("127.0.0.1", int(bootstrap_port))
+        local_graph.bootstrap_seeds.append(int(bootstrap_port))
 
     from protocol import DistributedRouter
     router = DistributedRouter("127.0.0.1", proxy_port, rng=rng)
 
     asyncio.create_task(router.health_check_loop(local_graph))
+    # Angelehnt an [ormandi2013gossip], [demers1987epidemic], [jelasity2007peersampling].
     asyncio.create_task(router.start_gossip_loop(local_graph))
 
     server = grpc.aio.server()

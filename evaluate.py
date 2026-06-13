@@ -15,6 +15,7 @@ def _t_crit(n):
     return float(t.ppf(0.975, n - 1))
 
 
+# Angelehnt an [aumueller2020annbenchmarks].
 def build_ground_truth_ids(dataset, queries, subset_size, k, dimension, dataset_name):
     import hashlib
     h = hashlib.md5(dataset[:subset_size].tobytes() + queries.tobytes()).hexdigest()[:8]
@@ -224,6 +225,7 @@ def run_evaluation():
             avg_recall  = np.mean(run_recalls) * 100
             avg_lat     = np.mean(rd["latencies"])
             all_lats    = rd["all_lats"]
+            # Angelehnt an [dean2013tail].
             avg_p50_lat = float(np.percentile(all_lats, 50))
             avg_p95_lat = float(np.percentile(all_lats, 95))
             avg_p99_lat = float(np.percentile(all_lats, 99))

@@ -70,6 +70,7 @@ def _stop_chaos_loop():
         _chaos_thread.join(timeout=5)
 
 
+# Angelehnt an [stutzbach2006churn].
 def _chaos_worker():
     rng = random.Random(FAULT_SEED)
 

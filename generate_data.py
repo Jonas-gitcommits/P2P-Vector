@@ -1,25 +1,38 @@
 import numpy as np
 import os
-import struct
+import sys
 import faiss
 from config import SUBSET_SIZE, NUM_NODES, DATASET, IR_CORPUS_CACHE, IR_QUERIES_CACHE
 
 SIFT_DIR = "sift_data/sift"
 
 
+# Übernommen aus facebookresearch/faiss, contrib/vecs_io.py [douze2024faiss].
+def ivecs_read(fname):
+    a = np.fromfile(fname, dtype='int32')
+    if sys.byteorder == 'big':
+        a.byteswap(inplace=True)
+    d = a[0]
+    return a.reshape(-1, d + 1)[:, 1:].copy()
+
+def fvecs_read(fname):
+    return ivecs_read(fname).view('float32')
+
+def ivecs_mmap(fname):
+    assert sys.byteorder != 'big'
+    a = np.memmap(fname, dtype='int32', mode='r')
+    d = a[0]
+    return a.reshape(-1, d + 1)[:, 1:]
+
+def fvecs_mmap(fname):
+    return ivecs_mmap(fname).view('float32')
+
+
 def read_fvecs(path, max_count=None):
-    vecs = []
-    with open(path, "rb") as f:
-        while True:
-            dim_bytes = f.read(4)
-            if not dim_bytes:
-                break
-            dim = struct.unpack("<i", dim_bytes)[0]
-            vec = np.frombuffer(f.read(dim * 4), dtype=np.float32)
-            vecs.append(vec)
-            if max_count is not None and len(vecs) >= max_count:
-                break
-    return np.array(vecs, dtype=np.float32)
+    vecs = fvecs_mmap(path)
+    if max_count is not None:
+        vecs = vecs[:max_count]
+    return np.ascontiguousarray(vecs, dtype=np.float32)
 
 
 def _verify_norms(embs, label, n=200):

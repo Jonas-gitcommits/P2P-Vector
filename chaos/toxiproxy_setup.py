@@ -1,3 +1,4 @@
+# Netzwerk-Fehlerinjektion (Latenz, Verbindungsabbrüche) über Toxiproxy.
 import json
 import urllib.request
 import urllib.error
@@ -60,8 +61,6 @@ def setup_proxies(num_nodes: int):
 
 
 def apply_latency_scenario(num_nodes: int, scenario: str):
-    """Entfernt vorhandene latency-toxics und setzt sie fürs Szenario neu.
-    loss-toxics bleiben unberührt. Zur Laufzeit aufrufbar."""
     if scenario not in LATENCY_PRESETS:
         raise ValueError(f"Unbekanntes Szenario: {scenario}")
     latency_ms, jitter_ms = LATENCY_PRESETS[scenario]

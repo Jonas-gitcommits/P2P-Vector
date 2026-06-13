@@ -1,3 +1,4 @@
+# Übernommen aus dem TEXMEX-Korpus (ANN_SIFT1M), http://corpus-texmex.irisa.fr/.
 import os
 import tarfile
 import urllib.request

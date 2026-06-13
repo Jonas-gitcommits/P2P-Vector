@@ -143,6 +143,7 @@ class DistributedRouter:
         except grpc.RpcError:
             return None
 
+    # Angelehnt an [malkov2020hnsw], [maymounkov2002kademlia].
     async def iterative_search(self, local_graph, query_vector, k, ttl):
         query_np = np.array(query_vector, dtype=np.float32)
         my_id = f"{self.my_ip}:{self.my_port}"
@@ -227,9 +228,17 @@ class DistributedRouter:
 
         return {"peers": final[:k], "rpc_count": rpc_count, "visited_nodes": visited_nodes}
 
+    def _reseed_if_isolated(self, local_graph):
+        if local_graph.neighbors:
+            return
+        for seed_port in local_graph.bootstrap_seeds:
+            if seed_port != self.my_port:
+                local_graph.add_neighbor_edge(self.my_ip, seed_port)
+
     async def start_gossip_loop(self, local_graph):
         while True:
             await asyncio.sleep(GOSSIP_INTERVAL_S)
+            self._reseed_if_isolated(local_graph)
             if not local_graph.neighbors:
                 continue
 
@@ -286,3 +295,5 @@ class DistributedRouter:
                 if target in self._channel_pool:
                     await self._channel_pool[target].close()
                     del self._channel_pool[target]
+
+            self._reseed_if_isolated(local_graph)

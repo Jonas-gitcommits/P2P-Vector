@@ -1,3 +1,4 @@
+# Übernommen aus BeIR/msmarco (Hugging Face).
 import os
 import numpy as np
 import faiss
@@ -7,7 +8,7 @@ from sentence_transformers import SentenceTransformer
 from config import IR_CACHE_DIR, IR_CORPUS_CACHE, IR_QUERIES_CACHE, DIMENSION
 
 _IR_DIM      = 384
-_MODEL       = "all-MiniLM-L6-v2"
+_MODEL       = "sentence-transformers/all-MiniLM-L6-v2"
 _BATCH       = 512
 _N_CORPUS    = 200_000
 _N_QUERIES   = 7_000
@@ -59,8 +60,9 @@ def _build_caches():
 
     rng = np.random.default_rng(_CORPUS_SEED)
     indices = rng.choice(total, size=_N_CORPUS, replace=False).tolist()
+    # Übernommen aus beir-cellar/beir (extract_corpus_sentences).
     doc_texts = [
-        f"{row.get('title', '')} {row['text']}".strip()
+        (row["title"] + " " + row["text"]).strip() if "title" in row else row["text"].strip()
         for row in corpus_ds.select(indices)
     ]
 
@@ -73,11 +75,12 @@ def _build_caches():
     query_texts = [queries_ds[int(i)]["text"] for i in q_indices]
     print(f"  {len(query_texts):,} Queries (sample aus {len(queries_ds):,}, seed={_CORPUS_SEED + 1})")
 
+    # Angelehnt an die Modellkarte sentence-transformers/all-MiniLM-L6-v2.
     print(f"[Cache-Build] Lade Encoder '{_MODEL}'…")
     model = SentenceTransformer(_MODEL)
 
     corpus_embs = _encode(model, doc_texts, "MS MARCO Passagen")
-    query_embs  = _encode(model, query_texts, "MS MARCO Dev-Queries")
+    query_embs  = _encode(model, query_texts, "MS MARCO Queries, Stichprobe aus dem BeIR-Query-Split")
 
     _verify_norms(corpus_embs, "Korpus-Embeddings")
     _verify_norms(query_embs,  "Query-Embeddings")

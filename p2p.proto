@@ -1,3 +1,4 @@
+// Wire-Protokoll über gRPC/Protocol Buffers [grpc].
 syntax = "proto3";
 
 package p2pvector;
