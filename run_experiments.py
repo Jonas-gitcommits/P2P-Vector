@@ -7,7 +7,7 @@ from evaluate import run_evaluation
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY   = sys.executable
 
-PROFILE    = "long"
+PROFILE    = "standard"
 SMOKE_TEST = False
 
 IR_CORPUS_SIZE = 200_000
@@ -19,8 +19,8 @@ FAULT_PROFILE = dict(FAULT_KILL_INTERVAL=8.0, FAULT_KILL_PROBABILITY=0.4, FAULT_
 PROFILES = {
     "standard": dict(
         DATASETS=["ir", "sift"],
-        TOTAL_VECTORS=20000, N_BASE=20, N_LIST_SCALE=[10, 20, 30, 50],
-        NUM_QUERIES=300, NUM_QUERIES_LATENCY=150, NUM_RUNS=5,
+        TOTAL_VECTORS=20000, N_BASE=20, N_LIST_SCALE=[10, 20, 30, 50, 100, 200, 500, 1000, 1500],
+        NUM_QUERIES=300, NUM_QUERIES_LATENCY=150, NUM_RUNS=20,
         GOSSIP_WARMUP_S=30,
         TTL_CORE=[2, 4, 6], TTL_CHURN=[4, 6], TTL_LATENCY=[4],
         FANOUT_LIST=[1, 2, 3, 4], WARMUP_LIST=[0, 10, 30],
@@ -349,8 +349,7 @@ def build_plan():
             nq    = P["NUM_QUERIES"] if heavy else 100
             for routing in ["greedy", "flood", "iterative"]:
                 m = _meta("scale", "clustered", routing, n, total // n, 0, True, "none", ds)
-                if not heavy:
-                    m["num_runs"] = 1
+                m["num_runs"] = 5 if heavy else 1
                 c = base_cfg(n, ttls, nq, total, DATASET=ds,
                              **{VAR_ROUTING: routing}, **_iter(routing))
                 plan.append((m, c, False))
