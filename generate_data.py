@@ -37,7 +37,7 @@ def read_fvecs(path, max_count=None):
 
 def _verify_norms(embs, label, n=200):
     norms = np.linalg.norm(embs[:n], axis=1)
-    assert np.allclose(norms, 1.0, atol=1e-5), f"{label}: Normen nicht alle ≈ 1!"
+    assert np.allclose(norms, 1.0, atol=1e-5), f"{label}: Normen nicht alle = 1"
 
 
 def _compute_partition(embs):
@@ -59,8 +59,8 @@ def _compute_partition(embs):
         for i in range(NUM_NODES)
         for j in range(i + 1, NUM_NODES)
     ]
-    print(f"  Paarweise Zentroid-Distanzen (L2):  "
-          f"min={min(dists):.3f}  Ø={np.mean(dists):.3f}  max={max(dists):.3f}")
+    print(f"  L2:  "
+          f"min={min(dists):.3f}  Durchschnitt={np.mean(dists):.3f}  max={max(dists):.3f}")
 
     return partition
 
@@ -95,11 +95,11 @@ def _generate_ir():
     print("Lade IR-Cache...")
     all_corpus  = np.load(IR_CORPUS_CACHE)
     all_queries = np.load(IR_QUERIES_CACHE)
-    print(f"  Korpus-Cache: {all_corpus.shape}  Query-Cache: {all_queries.shape}")
+    print(f"  Corpus-Cache: {all_corpus.shape}  Query-Cache: {all_queries.shape}")
 
     if SUBSET_SIZE > len(all_corpus):
         raise RuntimeError(
-            f"SUBSET_SIZE ({SUBSET_SIZE:,}) > Korpus-Cache ({len(all_corpus):,}). "
+            f"SUBSET_SIZE ({SUBSET_SIZE:,}) > Corpus-Cache ({len(all_corpus):,}). "
             f"Reduziere NUM_NODES * VECTORS_PER_NODE auf max. {len(all_corpus):,} in config.py."
         )
 

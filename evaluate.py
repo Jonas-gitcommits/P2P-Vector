@@ -8,6 +8,7 @@ import random
 import faiss
 import os
 import pickle
+import hashlib
 from scipy.stats import t
 
 
@@ -17,7 +18,6 @@ def _t_crit(n):
 
 # Angelehnt an [aumueller2020annbenchmarks].
 def build_ground_truth_ids(dataset, queries, subset_size, k, dimension, dataset_name):
-    import hashlib
     h = hashlib.md5(dataset[:subset_size].tobytes() + queries.tobytes()).hexdigest()[:8]
     cache_file = f"gt_cache_{dataset_name}_size{subset_size}_k{k}_{h}.pkl"
     if os.path.exists(cache_file):
@@ -25,7 +25,7 @@ def build_ground_truth_ids(dataset, queries, subset_size, k, dimension, dataset_
         with open(cache_file, "rb") as f:
             return pickle.load(f)
 
-    print(f"  [Cache Miss] Berechne Ground-Truth via FAISS (wird in {cache_file} gespeichert)...")
+    print(f"  [Cache Miss] Berechne Ground-Truth mit FAISS (wird in {cache_file} gespeichert)...")
     central_index = faiss.IndexFlatL2(dimension)
     central_index.add(dataset[:subset_size])
     dists, indices = central_index.search(queries, k)
@@ -110,7 +110,7 @@ def run_evaluation():
                   f"(benötigt {required}) nach {ready_wait_s:.1f}s.")
             break
         if ready_wait_s >= ready_deadline:
-            print(f"WARNUNG: Readiness-Deadline ({ready_deadline}s) überschritten — "
+            print(f"Readiness-Deadline ({ready_deadline}s) überschritten, "
                   f"nur {len(alive)}/{NUM_NODES} erreichbar (benötigt {required}). "
                   f"Fahre trotzdem fort.")
             break
@@ -136,7 +136,7 @@ def run_evaluation():
         except grpc.RpcError:
             pass
     if nb_counts:
-        print(f"Ø Nachbarn pro Knoten: {np.mean(nb_counts):.1f}  "
+        print(f"Durchschnittlich {np.mean(nb_counts):.1f} Nachbarn pro Knoten"
               f"(min={min(nb_counts)}, max={max(nb_counts)})")
 
     fanout_k = max(K * 4, 20)

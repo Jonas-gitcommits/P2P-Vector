@@ -98,7 +98,7 @@ def add_connection_drops(num_nodes: int):
         })
         print(
             f"[Toxiproxy] Verbindungsabbruch-Toxic auf {name}: "
-            f"{TOXIC_CONN_DROP_PCT}% Verbindungsabbrüche (limit_data, 1 Byte, downstream)"
+            f"{TOXIC_CONN_DROP_PCT}% Verbindungsabbrüche"
         )
 
 

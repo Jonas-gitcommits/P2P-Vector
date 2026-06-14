@@ -7,7 +7,7 @@ from evaluate import run_evaluation
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY   = sys.executable
 
-PROFILE    = "standard"
+PROFILE    = "long"
 SMOKE_TEST = False
 
 IR_CORPUS_SIZE = 200_000
@@ -29,7 +29,7 @@ PROFILES = {
     ),
     "long": dict(
         DATASETS=["ir", "sift"],
-        TOTAL_VECTORS=200000, N_BASE=20, N_LIST_SCALE=[10, 20, 50, 100, 200],
+        TOTAL_VECTORS=200000, N_BASE=20, N_LIST_SCALE=[10, 20, 50, 100, 200, 500, 1000, 1500],
         NUM_QUERIES=1000, NUM_QUERIES_LATENCY=400, NUM_RUNS=5,
         GOSSIP_WARMUP_S=40,
         TTL_CORE=[2, 4, 6, 8], TTL_CHURN=[4, 6, 8], TTL_LATENCY=[4, 6],
@@ -154,7 +154,7 @@ def start_network(n):
     subprocess.run(["pkill", "-f", "node\\.py.*P2PVEC_MARKER"], stderr=subprocess.DEVNULL)
     time.sleep(1)
     _sim_proc = subprocess.Popen([PY, "simulator.py"], cwd=HERE, start_new_session=True)
-    time.sleep(P["NETWORK_BOOT_WAIT"] + 0.05 * n)
+    time.sleep(P["NETWORK_BOOT_WAIT"] + 0.12 * n)
 
 def stop_network():
     global _sim_proc
@@ -284,7 +284,8 @@ def run_condition(meta, cfg, regen):
     if regen and not generate_data():
         return False
     run_rows = []
-    for r in range(P["NUM_RUNS"]):
+    num_runs = meta.pop("num_runs", P["NUM_RUNS"])
+    for r in range(num_runs):
         set_config(SEED=BASE_SEED + r)
         try:
             start_network(meta["num_nodes"])
@@ -343,9 +344,14 @@ def build_plan():
                 plan.append((m, c, False))
 
         for n in P["N_LIST_SCALE"]:
+            heavy = n <= 200
+            ttls  = P["TTL_CORE"] if heavy else [6]
+            nq    = P["NUM_QUERIES"] if heavy else 100
             for routing in ["greedy", "flood", "iterative"]:
                 m = _meta("scale", "clustered", routing, n, total // n, 0, True, "none", ds)
-                c = base_cfg(n, P["TTL_CORE"], P["NUM_QUERIES"], total, DATASET=ds,
+                if not heavy:
+                    m["num_runs"] = 1
+                c = base_cfg(n, ttls, nq, total, DATASET=ds,
                              **{VAR_ROUTING: routing}, **_iter(routing))
                 plan.append((m, c, False))
 

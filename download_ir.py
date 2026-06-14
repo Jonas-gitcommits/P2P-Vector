@@ -19,7 +19,7 @@ _CORPUS_HF   = "BeIR/msmarco"
 def _check_dimension():
     if DIMENSION != _IR_DIM:
         raise RuntimeError(
-            f"Konfigurationsfehler: DIMENSION ({DIMENSION}) stimmt nicht mit IR_DIM ({_IR_DIM}) überein. "
+            f"Fehler: DIMENSION ({DIMENSION}) stimmt nicht mit IR_DIM ({_IR_DIM}) überein. "
         )
 
 
@@ -36,7 +36,7 @@ def _encode(model, texts, label):
 
 def _verify_norms(embs, label, n=200):
     norms = np.linalg.norm(embs[:n], axis=1)
-    assert np.allclose(norms, 1.0, atol=1e-5), f"{label}: Normen nicht auf 1"
+    assert np.allclose(norms, 1.0, atol=1e-5), f"{label}: Normen nicht alle = 1"
  
 def _spot_check(doc_embs, q_embs):
     probe = doc_embs[:min(50_000, len(doc_embs))]
@@ -52,10 +52,10 @@ def _build_caches():
     print("[Cache-Build] Lade MS MARCO Passagenkorpus...")
     corpus_ds = load_dataset(_CORPUS_HF, "corpus", split="corpus")
     total = len(corpus_ds)
-    print(f"  Gesamtkorpus: {total:,} Passagen aus {_CORPUS_HF}.")
+    print(f"  Gesamtcorpus: {total:,} Passagen aus {_CORPUS_HF}.")
     if total < _N_CORPUS:
         raise RuntimeError(
-            f"MS MARCO Korpus ({total:,}) kleiner als _N_CORPUS ({_N_CORPUS:,})."
+            f"MS MARCO Corpus ({total:,}) kleiner als _N_CORPUS ({_N_CORPUS:,})."
         )
 
     rng = np.random.default_rng(_CORPUS_SEED)
@@ -80,9 +80,9 @@ def _build_caches():
     model = SentenceTransformer(_MODEL)
 
     corpus_embs = _encode(model, doc_texts, "MS MARCO Passagen")
-    query_embs  = _encode(model, query_texts, "MS MARCO Queries, Stichprobe aus dem BeIR-Query-Split")
+    query_embs  = _encode(model, query_texts, "MS MARCO Queries")
 
-    _verify_norms(corpus_embs, "Korpus-Embeddings")
+    _verify_norms(corpus_embs, "Corpus-Embeddings")
     _verify_norms(query_embs,  "Query-Embeddings")
 
     os.makedirs(IR_CACHE_DIR, exist_ok=True)
