@@ -349,7 +349,7 @@ def build_plan():
             nq    = P["NUM_QUERIES"] if heavy else 100
             for routing in ["greedy", "flood", "iterative"]:
                 m = _meta("scale", "clustered", routing, n, total // n, 0, True, "none", ds)
-                m["num_runs"] = 5 if heavy else 1
+                m["num_runs"] = 5 if heavy else 3
                 c = base_cfg(n, ttls, nq, total, DATASET=ds,
                              **{VAR_ROUTING: routing}, **_iter(routing))
                 plan.append((m, c, False))
