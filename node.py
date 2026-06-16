@@ -6,6 +6,7 @@ import numpy as np
 import faiss
 import random
 import sys
+import signal
 from config import HNSW_M, DIMENSION, ROUTING_STRATEGY
 
 class LocalGraphState:
@@ -280,7 +281,16 @@ async def serve(real_port, bootstrap_port=None, node_id=0, proxy_port=None, seed
     server.add_insecure_port(f'127.0.0.1:{real_port}')
 
     await server.start()
-    await server.wait_for_termination()
+
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for _sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(_sig, stop_event.set)
+        except NotImplementedError:
+            pass
+    await stop_event.wait()
+    await server.stop(2)
 
 if __name__ == '__main__':
     real_p = int(sys.argv[1]) if len(sys.argv) > 1 else 5000

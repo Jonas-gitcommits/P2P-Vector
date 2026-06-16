@@ -87,6 +87,7 @@ def run_evaluation():
     early_stop_threshold = EARLY_STOP_THRESHOLD if EARLY_STOP_ENABLED else 0.0
     port_start = PROXY_PORT_START if TOXIPROXY_ENABLED else REAL_PORT_START
     all_nodes = [f"127.0.0.1:{port_start + i}" for i in range(NUM_NODES)]
+    probe_nodes = [f"127.0.0.1:{REAL_PORT_START + i}" for i in range(NUM_NODES)]
 
     print("Lade Datensatz...")
     dataset     = np.load("dataset.npy").astype(np.float32)
@@ -103,7 +104,7 @@ def run_evaluation():
     ready_deadline = 180.0
     ready_start = time.time()
     while True:
-        alive = get_alive_nodes(all_nodes)
+        alive = get_alive_nodes(probe_nodes)
         ready_wait_s = time.time() - ready_start
         if len(alive) >= required:
             print(f"Readiness erreicht: {len(alive)}/{NUM_NODES} "
@@ -120,7 +121,8 @@ def run_evaluation():
         print(f"Warte {GOSSIP_WARMUP_S}s für Gossip-Konvergenz...")
         time.sleep(GOSSIP_WARMUP_S)
 
-    alive_nodes = get_alive_nodes(all_nodes)
+    alive_real = set(get_alive_nodes(probe_nodes))
+    alive_nodes = [all_nodes[i] for i in range(NUM_NODES) if probe_nodes[i] in alive_real]
     print(f"Erreichbar: {len(alive_nodes)}/{len(all_nodes)}")
     if not alive_nodes:
         print("Keine Knoten erreichbar! Abbruch.")

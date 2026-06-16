@@ -8,7 +8,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PY   = sys.executable
 
 PROFILE    = "standard"
-SMOKE_TEST = False
+SMOKE_TEST = True
 
 IR_CORPUS_SIZE = 200_000
 BASE_SEED = 1234
