@@ -7,8 +7,8 @@ from evaluate import run_evaluation
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY   = sys.executable
 
-PROFILE    = "standard"
-SMOKE_TEST = True
+PROFILE    = "long"
+SMOKE_TEST = False
 
 IR_CORPUS_SIZE = 200_000
 BASE_SEED = 1234
@@ -28,9 +28,9 @@ PROFILES = {
         NETWORK_BOOT_WAIT=6,
     ),
     "long": dict(
-        DATASETS=["ir", "sift"],
-        TOTAL_VECTORS=200000, N_BASE=20, N_LIST_SCALE=[10, 20, 50, 100, 200, 500, 1000, 1500],
-        NUM_QUERIES=1000, NUM_QUERIES_LATENCY=400, NUM_RUNS=5,
+        DATASETS=["ir"],
+        TOTAL_VECTORS=20000, N_BASE=50, SKIP_SCALE=True, N_LIST_SCALE=[10, 20, 50, 100, 200, 500, 1000, 1500],
+        NUM_QUERIES=500, NUM_QUERIES_LATENCY=200, NUM_RUNS=20,
         GOSSIP_WARMUP_S=40,
         TTL_CORE=[2, 4, 6, 8], TTL_CHURN=[4, 6, 8], TTL_LATENCY=[4, 6],
         FANOUT_LIST=[1, 2, 3, 4, 6, 8], WARMUP_LIST=[0, 5, 10, 20, 40, 60],
@@ -304,7 +304,7 @@ def run_condition(meta, cfg, regen):
 
 def build_plan():
     plan = []
-    datasets = P.get("DATASETS", ["sift"])
+    datasets = P.get("DATASETS", ["ir"])
 
     if SMOKE_TEST:
         for di, ds in enumerate(datasets):
@@ -343,7 +343,7 @@ def build_plan():
                              **{VAR_PLACEMENT: placement, VAR_ROUTING: routing}, **_iter(routing))
                 plan.append((m, c, False))
 
-        for n in P["N_LIST_SCALE"]:
+        for n in (P["N_LIST_SCALE"] if not P.get("SKIP_SCALE", False) else []):
             heavy = n <= 200
             ttls  = P["TTL_CORE"] if heavy else [6]
             nq    = P["NUM_QUERIES"] if heavy else 100
