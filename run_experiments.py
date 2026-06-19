@@ -7,7 +7,7 @@ from evaluate import run_evaluation
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY   = sys.executable
 
-PROFILE    = "long"
+PROFILE    = "adaptive"
 SMOKE_TEST = False
 
 IR_CORPUS_SIZE = 200_000
@@ -43,18 +43,14 @@ PROFILES = {
         NUM_QUERIES=500, NUM_QUERIES_LATENCY=200, NUM_RUNS=20,
         GOSSIP_WARMUP_S=40, NETWORK_BOOT_WAIT=12,
         ADAPTIVE_ONLY=True,
-        # iterative: efSearch
+        ITER_TTL_CONST=64,
+        WARMUP_CROSS_N=[100, 200], WARMUP_CROSS_VALUES=[40, 120, 240],
+        WARMUP_CROSS_RUNS=12, WARMUP_CROSS_EF=64,
         EF_SWEEP_N=[100, 200], EF_SWEEP_VALUES=[16, 32, 48, 64, 96, 128],
-        EF_SWEEP_TTL=[6], EF_SWEEP_RUNS=10,
-        EF_RULE_N=[50, 100, 200, 500, 1000], EF_RULES=["fixed16", "linear", "log"],
-        EF_RULE_TTL=[6],
-        # greedy: Fanout 
-        FANOUT_SWEEP_N=[100, 200], FANOUT_SWEEP_VALUES=[2, 3, 4, 5, 6, 8],
+        EF_SWEEP_RUNS=10,
+        FANOUT_SWEEP_N=[100, 200], FANOUT_SWEEP_VALUES=[2, 3, 4],
         FANOUT_SWEEP_TTL=[6], FANOUT_SWEEP_RUNS=10,
-        FANOUT_RULE_N=[50, 100, 200, 500, 1000], FANOUT_RULES=["fixed2", "root"],
-        FANOUT_RULE_TTL=[6],
-        # beide Strategien: TTL-Reichweite
-        TTL_RULE_N=[50, 100, 200, 500, 1000], TTL_RULES=["fixed6", "log"],
+        ALPHA_TEST_N=[100, 200], ALPHA_VALUES=[1, 3],
     ),
 }
 P = PROFILES[PROFILE]
@@ -101,7 +97,7 @@ def _meta(block, placement, routing, n, vpn, fmd, repl, scen, dataset):
                 latency_scenario=scen, dataset=dataset)
 
 def meta_str(m):
-    extra = "".join(f" {k}={m[k]}" for k in ("fanout", "gossip_warmup_s", "conn_drop_pct", "early_stop", "routing_ef", "ef_rule", "fanout_rule", "ttl_rule") if k in m)
+    extra = "".join(f" {k}={m[k]}" for k in ("fanout", "gossip_warmup_s", "conn_drop_pct", "early_stop", "routing_ef", "ef_rule", "ttl_mode", "routing_alpha", "fanout_rule", "ttl_rule") if k in m)
     return (f"{m['block']} ds={m['dataset']} place={m['placement']} route={m['routing']} "
             f"N={m['num_nodes']} fault={m['fault_max_down']} repl={m['replication']} "
             f"lat={m['latency_scenario']}{extra}")
@@ -259,6 +255,9 @@ def _aggregate(run_rows):
         lci_lo,  lci_hi  = _ci(lats)
         alive_vals = [float(r["alive_count"]) for r in rows if r.get("alive_count") is not None]
         wait_vals  = [float(r["ready_wait_s"]) for r in rows if r.get("ready_wait_s") is not None]
+        nbm_vals   = [float(r["neighbor_count_mean"]) for r in rows if r.get("neighbor_count_mean") is not None]
+        nbmin_vals = [float(r["neighbor_count_min"])  for r in rows if r.get("neighbor_count_min")  is not None]
+        nbmax_vals = [float(r["neighbor_count_max"])  for r in rows if r.get("neighbor_count_max")  is not None]
         lat_pool = []
         for r in rows:
             lat_pool.extend(r.get("_lat_samples") or [])
@@ -291,6 +290,9 @@ def _aggregate(run_rows):
             "unique_nodes_mean":           round(float(np.nanmean([float(r["unique_nodes_mean"]) for r in rows])), 2),
             "alive_count_min":             int(min(alive_vals)) if alive_vals else None,
             "ready_wait_s_max":            round(max(wait_vals), 1) if wait_vals else None,
+            "neighbor_count_mean":         round(float(np.mean(nbm_vals)), 2) if nbm_vals else None,
+            "neighbor_count_min":          int(min(nbmin_vals)) if nbmin_vals else None,
+            "neighbor_count_max":          int(max(nbmax_vals)) if nbmax_vals else None,
         })
     return result
 
@@ -324,7 +326,8 @@ def run_condition(meta, cfg, regen):
 def _ef_linear(n, frac=0.4): return max(16, round(frac * n))
 def _ef_log(n, c=8):         return max(16, round(c * math.log2(n)))
 def _ef_fixed(n):            return 16
-EF_RULE_FUNCS = {"fixed16": _ef_fixed, "linear": _ef_linear, "log": _ef_log}
+def _ef_his(n):             return int(10 + 2 * math.log2(n))
+EF_RULE_FUNCS = {"fixed16": _ef_fixed, "linear": _ef_linear, "log": _ef_log, "his": _ef_his}
 
 def _fanout_fixed2(n):             return 2
 def _fanout_root(n, c=2.0, p=3.0): return min(8, max(2, round(c * (n / 50.0) ** (1.0 / p))))
@@ -339,26 +342,26 @@ def _adaptive_iter_cfg(ef):
 
 def build_adaptive_plan():
     plan = []
+    ttl_const = P.get("ITER_TTL_CONST", 64)
+    ef_fixed  = P.get("WARMUP_CROSS_EF", 64)
     for ds in P.get("DATASETS", ["ir"]):
         total = _total_for(ds)
+
+        for n in P.get("WARMUP_CROSS_N", []):
+            for w in P.get("WARMUP_CROSS_VALUES", []):
+                m = _meta("adaptive_warmup", "clustered", "iterative", n, total // n, 0, True, "none", ds)
+                m["routing_ef"] = ef_fixed; m["ttl_mode"] = f"fixed{ttl_const}"; m["gossip_warmup_s"] = w
+                m["num_runs"] = P.get("WARMUP_CROSS_RUNS", 12)
+                c = base_cfg(n, [ttl_const], P["NUM_QUERIES"], total, DATASET=ds,
+                             **{VAR_ROUTING: "iterative", VAR_ALPHA: 3, VAR_EF: ef_fixed, VAR_WARMUP: w})
+                plan.append((m, c, False))
 
         for n in P.get("EF_SWEEP_N", []):
             for ef in P.get("EF_SWEEP_VALUES", []):
                 m = _meta("adaptive_ef", "clustered", "iterative", n, total // n, 0, True, "none", ds)
-                m["routing_ef"] = ef
+                m["routing_ef"] = ef; m["ttl_mode"] = f"fixed{ttl_const}"
                 m["num_runs"] = P.get("EF_SWEEP_RUNS", P["NUM_RUNS"])
-                c = base_cfg(n, P.get("EF_SWEEP_TTL", [6]), P["NUM_QUERIES"], total,
-                             DATASET=ds, **_adaptive_iter_cfg(ef))
-                plan.append((m, c, False))
-
-        for n in P.get("EF_RULE_N", []):
-            heavy = n <= 200
-            for rule in P.get("EF_RULES", []):
-                ef = EF_RULE_FUNCS[rule](n)
-                m = _meta("adaptive_ef_rule", "clustered", "iterative", n, total // n, 0, True, "none", ds)
-                m["routing_ef"] = ef; m["ef_rule"] = rule
-                m["num_runs"] = P["NUM_RUNS"] if heavy else 3
-                c = base_cfg(n, P.get("EF_RULE_TTL", [6]), P["NUM_QUERIES"], total,
+                c = base_cfg(n, [ttl_const], P["NUM_QUERIES"], total,
                              DATASET=ds, **_adaptive_iter_cfg(ef))
                 plan.append((m, c, False))
 
@@ -371,6 +374,30 @@ def build_adaptive_plan():
                              DATASET=ds, **{VAR_ROUTING: "greedy", VAR_FANOUT: fan})
                 plan.append((m, c, False))
 
+        for n in P.get("ALPHA_TEST_N", []):
+            heavy = n <= 200
+            ef = _ef_his(n)
+            for a in P.get("ALPHA_VALUES", []):
+                m = _meta("adaptive_alpha", "clustered", "iterative", n, total // n, 0, True, "none", ds)
+                m["routing_ef"] = ef; m["ttl_mode"] = f"fixed{ttl_const}"; m["routing_alpha"] = a
+                m["num_runs"] = P["NUM_RUNS"] if heavy else 3
+                c = base_cfg(n, [ttl_const], P["NUM_QUERIES"], total,
+                             DATASET=ds, **{VAR_ROUTING: "iterative", VAR_ALPHA: a, VAR_EF: ef})
+                plan.append((m, c, False))
+
+        for n in P.get("EF_RULE_N", []):
+            heavy = n <= 200
+            for rule in P.get("EF_RULES", []):
+                ef = EF_RULE_FUNCS[rule](n)
+                for tmode in P.get("EF_RULE_TTL_MODES", ["coupled"]):
+                    ttl = 6 if tmode == "fixed6" else (ef if tmode == "coupled" else ef + 8)
+                    m = _meta("adaptive_ef_rule", "clustered", "iterative", n, total // n, 0, True, "none", ds)
+                    m["routing_ef"] = ef; m["ef_rule"] = rule; m["ttl_mode"] = tmode
+                    m["num_runs"] = P["NUM_RUNS"] if heavy else 3
+                    c = base_cfg(n, [ttl], P["NUM_QUERIES"], total,
+                                 DATASET=ds, **_adaptive_iter_cfg(ef))
+                    plan.append((m, c, False))
+
         for n in P.get("FANOUT_RULE_N", []):
             heavy = n <= 200
             for rule in P.get("FANOUT_RULES", []):
@@ -380,17 +407,6 @@ def build_adaptive_plan():
                 m["num_runs"] = P["NUM_RUNS"] if heavy else 3
                 c = base_cfg(n, P.get("FANOUT_RULE_TTL", [6]), P["NUM_QUERIES"], total,
                              DATASET=ds, **{VAR_ROUTING: "greedy", VAR_FANOUT: fan})
-                plan.append((m, c, False))
-
-        for n in P.get("TTL_RULE_N", []):
-            heavy = n <= 200
-            for rule in P.get("TTL_RULES", []):
-                ttl = TTL_RULE_FUNCS[rule](n)
-                m = _meta("adaptive_ttl", "clustered", "iterative", n, total // n, 0, True, "none", ds)
-                m["routing_ef"] = 16; m["ttl_rule"] = rule
-                m["num_runs"] = P["NUM_RUNS"] if heavy else 3
-                c = base_cfg(n, [ttl], P["NUM_QUERIES"], total,
-                             DATASET=ds, **_adaptive_iter_cfg(16))
                 plan.append((m, c, False))
 
     return plan

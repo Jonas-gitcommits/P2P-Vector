@@ -138,8 +138,11 @@ def run_evaluation():
         except grpc.RpcError:
             pass
     if nb_counts:
-        print(f"Durchschnittlich {np.mean(nb_counts):.1f} Nachbarn pro Knoten"
-              f"(min={min(nb_counts)}, max={max(nb_counts)})")
+        nb_mean = float(np.mean(nb_counts)); nb_min = int(min(nb_counts)); nb_max = int(max(nb_counts))
+        print(f"Durchschnittlich {nb_mean:.1f} Nachbarn pro Knoten "
+              f"(min={nb_min}, max={nb_max})")
+    else:
+        nb_mean = nb_min = nb_max = None
 
     fanout_k = max(K * 4, 20)
     lat_ms, jitter_ms = LATENCY_PRESETS.get(LATENCY_SCENARIO, (0, 0))
@@ -279,6 +282,9 @@ def run_evaluation():
             "unique_nodes_mean":           round(avg_unique, 2),
             "alive_count":                 len(alive_nodes),
             "ready_wait_s":                round(ready_wait_s, 1),
+            "neighbor_count_mean":         round(nb_mean, 2) if nb_mean is not None else None,
+            "neighbor_count_min":          nb_min,
+            "neighbor_count_max":          nb_max,
             "_lat_samples":                list(rd["all_lats"]),
         })
     return rows
