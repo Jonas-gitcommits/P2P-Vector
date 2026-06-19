@@ -7,7 +7,7 @@ from evaluate import run_evaluation
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY   = sys.executable
 
-PROFILE    = "adaptive"
+PROFILE    = "reach"
 SMOKE_TEST = False
 
 IR_CORPUS_SIZE = 200_000
@@ -33,9 +33,10 @@ PROFILES = {
         NUM_QUERIES=500, NUM_QUERIES_LATENCY=200, NUM_RUNS=20,
         GOSSIP_WARMUP_S=40,
         TTL_CORE=[2, 4, 6, 8], TTL_CHURN=[4, 6, 8], TTL_LATENCY=[4, 6],
-        FANOUT_LIST=[1, 2, 3, 4, 6, 8], WARMUP_LIST=[0, 5, 10, 20, 40, 60],
+        FANOUT_LIST=[1, 2, 3, 4, 6], WARMUP_LIST=[0, 5, 10, 20, 40, 60],
         CONNDROP_LIST=[0, 5, 10, 20, 40], FAULT_LEVELS=[0, 2, 4, 8],
         NETWORK_BOOT_WAIT=12,
+        RUN_BLOCKS=["gossip", "conndrop"],
     ),
     "adaptive": dict(
         DATASETS=["ir"],
@@ -51,6 +52,19 @@ PROFILES = {
         FANOUT_SWEEP_N=[100, 200], FANOUT_SWEEP_VALUES=[2, 3, 4],
         FANOUT_SWEEP_TTL=[6], FANOUT_SWEEP_RUNS=10,
         ALPHA_TEST_N=[100, 200], ALPHA_VALUES=[1, 3],
+    ),
+    "reach": dict(
+        DATASETS=["ir"],
+        TOTAL_VECTORS=20000, N_BASE=50, SKIP_SCALE=True,
+        NUM_QUERIES=500, NUM_QUERIES_LATENCY=200, NUM_RUNS=10,
+        GOSSIP_WARMUP_S=40, NETWORK_BOOT_WAIT=12,
+        ADAPTIVE_ONLY=True,
+        ITER_TTL_CONST=64,
+        
+        SCALE_TTL_N=[100, 200, 500, 1000], SCALE_TTL_VALUE=8, SCALE_TTL_RUNS=10,
+        
+        EF_SWEEP_N=[500, 1000], EF_SWEEP_VALUES=[16, 32, 48, 64, 96, 128],
+        EF_SWEEP_RUNS=10,
     ),
 }
 P = PROFILES[PROFILE]
@@ -385,6 +399,15 @@ def build_adaptive_plan():
                              DATASET=ds, **{VAR_ROUTING: "iterative", VAR_ALPHA: a, VAR_EF: ef})
                 plan.append((m, c, False))
 
+        for n in P.get("SCALE_TTL_N", []):
+            ttl_val = P.get("SCALE_TTL_VALUE", 8)
+            for routing in ["greedy", "flood", "iterative"]:
+                m = _meta("scale_ttl", "clustered", routing, n, total // n, 0, True, "none", ds)
+                m["num_runs"] = P.get("SCALE_TTL_RUNS", P["NUM_RUNS"])
+                c = base_cfg(n, [ttl_val], P["NUM_QUERIES"], total,
+                             DATASET=ds, **{VAR_ROUTING: routing}, **_iter(routing))
+                plan.append((m, c, False))
+
         for n in P.get("EF_RULE_N", []):
             heavy = n <= 200
             for rule in P.get("EF_RULES", []):
@@ -410,6 +433,11 @@ def build_adaptive_plan():
                 plan.append((m, c, False))
 
     return plan
+
+def _block_active(name):
+    sel = P.get("RUN_BLOCKS")
+    return name in sel if sel else True
+
 
 def build_plan():
     plan = []
@@ -448,14 +476,14 @@ def build_plan():
         total = _total_for(ds)
         nb, vb = P["N_BASE"], total // P["N_BASE"]
 
-        for placement in ["clustered", "contiguous"]:
+        for placement in (["clustered", "contiguous"] if _block_active("ablation") else []):
             for routing in ["greedy", "random", "flood", "iterative"]:
                 m = _meta("ablation", placement, routing, nb, vb, 0, True, "none", ds)
                 c = base_cfg(nb, P["TTL_CORE"], P["NUM_QUERIES"], total, DATASET=ds,
                              **{VAR_PLACEMENT: placement, VAR_ROUTING: routing}, **_iter(routing))
                 plan.append((m, c, False))
 
-        for n in (P["N_LIST_SCALE"] if not P.get("SKIP_SCALE", False) else []):
+        for n in (P["N_LIST_SCALE"] if not P.get("SKIP_SCALE", False) and _block_active("scale") else []):
             heavy = n <= 200
             ttls  = P["TTL_CORE"] if heavy else [6]
             nq    = P["NUM_QUERIES"] if heavy else 100
@@ -467,7 +495,7 @@ def build_plan():
                 plan.append((m, c, False))
 
         fmax = max(P["FAULT_LEVELS"]) or 4
-        for routing in ["greedy", "iterative"]:
+        for routing in (["greedy", "iterative"] if _block_active("churn") else []):
             for fmd in P["FAULT_LEVELS"]:
                 m = _meta("churn", "clustered", routing, nb, vb, fmd, True, "none", ds)
                 c = base_cfg(nb, P["TTL_CHURN"], P["NUM_QUERIES"], total, DATASET=ds,
@@ -481,7 +509,7 @@ def build_plan():
                          **{VAR_ROUTING: routing}, **_iter(routing))
             plan.append((m, c, False))
 
-        for scen in ["none", "mid", "high"]:
+        for scen in (["none", "mid", "high"] if _block_active("latency") else []):
             for routing in ["greedy", "flood", "iterative"]:
                 m = _meta("latency", "clustered", routing, nb, vb, 0, True, scen, ds)
                 c = base_cfg(nb, P["TTL_LATENCY"], P["NUM_QUERIES_LATENCY"], total,
@@ -489,20 +517,20 @@ def build_plan():
                              **{VAR_ROUTING: routing}, **_iter(routing))
                 plan.append((m, c, True))
 
-        for fan in P["FANOUT_LIST"]:
+        for fan in (P["FANOUT_LIST"] if _block_active("fanout") else []):
             m = _meta("fanout", "clustered", "greedy", nb, vb, 0, True, "none", ds)
             m["fanout"] = fan
             c = base_cfg(nb, P["TTL_CORE"], P["NUM_QUERIES"], total,
                          DATASET=ds, **{VAR_FANOUT: fan})
             plan.append((m, c, False))
 
-        for w in P["WARMUP_LIST"]:
+        for w in (P["WARMUP_LIST"] if _block_active("gossip") else []):
             m = _meta("gossip", "clustered", "greedy", nb, vb, 0, True, "none", ds)
             m["gossip_warmup_s"] = w
             c = base_cfg(nb, [4], P["NUM_QUERIES"], total, DATASET=ds, **{VAR_WARMUP: w})
             plan.append((m, c, False))
 
-        for pct in P["CONNDROP_LIST"]:
+        for pct in (P["CONNDROP_LIST"] if _block_active("conndrop") else []):
             m = _meta("conndrop", "clustered", "greedy", nb, vb, 0, True, "none", ds)
             m["conn_drop_pct"] = pct
             c = base_cfg(nb, [4], P["NUM_QUERIES_LATENCY"], total,
@@ -510,7 +538,7 @@ def build_plan():
             plan.append((m, c, True))
 
         ttl_h = P["TTL_CORE"][len(P["TTL_CORE"]) // 2:]
-        for routing in ["greedy", "iterative"]:
+        for routing in (["greedy", "iterative"] if _block_active("earlystop") else []):
             for es in [False, True]:
                 m = _meta("earlystop", "clustered", routing, nb, vb, 0, True, "none", ds)
                 m["early_stop"] = es
