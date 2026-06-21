@@ -40,6 +40,8 @@ message SearchResponse {
 
 message PingRequest {
   string sender_ip = 1;
+  int32 sender_port = 2;
+  bool register = 3;
 }
 
 message PingResponse {

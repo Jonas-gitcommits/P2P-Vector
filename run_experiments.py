@@ -1,13 +1,13 @@
-import os, re, sys, csv, time, signal, subprocess, urllib.request, math
+import os, re, sys, csv, time, signal, subprocess, urllib.request
 from datetime import datetime
 import numpy as np
 from scipy.stats import t as _t_dist
-from evaluate import run_evaluation
+from evaluate import run_evaluation, run_topology
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY   = sys.executable
 
-PROFILE    = "reach"
+PROFILE    = "extra"
 SMOKE_TEST = False
 
 IR_CORPUS_SIZE = 200_000
@@ -27,44 +27,30 @@ PROFILES = {
         CONNDROP_LIST=[0, 10, 30], FAULT_LEVELS=[0, 2, 4],
         NETWORK_BOOT_WAIT=6,
     ),
-    "long": dict(
+    "extra": dict(
         DATASETS=["ir"],
-        TOTAL_VECTORS=20000, N_BASE=50, SKIP_SCALE=True, N_LIST_SCALE=[10, 20, 50, 100, 200, 500, 1000, 1500],
-        NUM_QUERIES=500, NUM_QUERIES_LATENCY=200, NUM_RUNS=20,
-        GOSSIP_WARMUP_S=40,
-        TTL_CORE=[2, 4, 6, 8], TTL_CHURN=[4, 6, 8], TTL_LATENCY=[4, 6],
-        FANOUT_LIST=[1, 2, 3, 4, 6], WARMUP_LIST=[0, 5, 10, 20, 40, 60],
-        CONNDROP_LIST=[0, 5, 10, 20, 40], FAULT_LEVELS=[0, 2, 4, 8],
-        NETWORK_BOOT_WAIT=12,
-        RUN_BLOCKS=["gossip", "conndrop"],
-    ),
-    "adaptive": dict(
-        DATASETS=["ir"],
-        TOTAL_VECTORS=20000, N_BASE=50, SKIP_SCALE=True,
+        TOTAL_VECTORS=20000, N_BASE=50,
         NUM_QUERIES=500, NUM_QUERIES_LATENCY=200, NUM_RUNS=20,
         GOSSIP_WARMUP_S=40, NETWORK_BOOT_WAIT=12,
         ADAPTIVE_ONLY=True,
         ITER_TTL_CONST=64,
+       
+        EF_SWEEP_N=[100, 200, 500, 1000], EF_SWEEP_VALUES=[16, 32, 48, 64, 96, 128],
+        EF_SWEEP_RUNS=20,
+       
         WARMUP_CROSS_N=[100, 200], WARMUP_CROSS_VALUES=[40, 120, 240],
-        WARMUP_CROSS_RUNS=12, WARMUP_CROSS_EF=64,
-        EF_SWEEP_N=[100, 200], EF_SWEEP_VALUES=[16, 32, 48, 64, 96, 128],
-        EF_SWEEP_RUNS=10,
-        FANOUT_SWEEP_N=[100, 200], FANOUT_SWEEP_VALUES=[2, 3, 4],
-        FANOUT_SWEEP_TTL=[6], FANOUT_SWEEP_RUNS=10,
-        ALPHA_TEST_N=[100, 200], ALPHA_VALUES=[1, 3],
-    ),
-    "reach": dict(
-        DATASETS=["ir"],
-        TOTAL_VECTORS=20000, N_BASE=50, SKIP_SCALE=True,
-        NUM_QUERIES=500, NUM_QUERIES_LATENCY=200, NUM_RUNS=10,
-        GOSSIP_WARMUP_S=40, NETWORK_BOOT_WAIT=12,
-        ADAPTIVE_ONLY=True,
-        ITER_TTL_CONST=64,
+        WARMUP_CROSS_EF=64, WARMUP_CROSS_RUNS=20,
         
-        SCALE_TTL_N=[100, 200, 500, 1000], SCALE_TTL_VALUE=8, SCALE_TTL_RUNS=10,
+        ALPHA_TEST_N=[100, 200], ALPHA_VALUES=[1, 3], ALPHA_EF=64, ALPHA_RUNS=20,
         
-        EF_SWEEP_N=[500, 1000], EF_SWEEP_VALUES=[16, 32, 48, 64, 96, 128],
-        EF_SWEEP_RUNS=10,
+        SCALE_TTL_N=[200, 500, 1000], SCALE_TTL_VALUE=8, SCALE_TTL_EF=16, SCALE_TTL_RUNS=20,
+        
+        TOPOLOGY_N=[100, 200], TOPOLOGY_RUNS=20,
+       
+        CONNFIX_EF=64, CONNFIX_ALPHA=3, CONNFIX_TTL=64, CONNFIX_RUNS=8,
+        CONNFIX_NQ_LARGE=150,
+        CONNFIX_CELLS=[(100, 10), (200, 40), (500, 50), (1000, 60), (1500, 60)],
+        CONNFIX_TTL_PROBE_VALUES=[6, 64],
     ),
 }
 P = PROFILES[PROFILE]
@@ -111,7 +97,7 @@ def _meta(block, placement, routing, n, vpn, fmd, repl, scen, dataset):
                 latency_scenario=scen, dataset=dataset)
 
 def meta_str(m):
-    extra = "".join(f" {k}={m[k]}" for k in ("fanout", "gossip_warmup_s", "conn_drop_pct", "early_stop", "routing_ef", "ef_rule", "ttl_mode", "routing_alpha", "fanout_rule", "ttl_rule") if k in m)
+    extra = "".join(f" {k}={m[k]}" for k in ("fanout", "gossip_warmup_s", "conn_drop_pct", "early_stop", "routing_ef", "ef_rule", "ttl_mode", "routing_alpha", "fanout_rule", "ttl_rule", "bidirectional", "random_gossip") if k in m)
     return (f"{m['block']} ds={m['dataset']} place={m['placement']} route={m['routing']} "
             f"N={m['num_nodes']} fault={m['fault_max_down']} repl={m['replication']} "
             f"lat={m['latency_scenario']}{extra}")
@@ -125,6 +111,7 @@ def base_cfg(n, ttl, nq, total, **extra):
         "FAULT_MAX_DOWN": 0, "REPLICATION": True, "EARLY_STOP_ENABLED": False,
         VAR_PLACEMENT: "clustered", VAR_ROUTING: "greedy", VAR_FANOUT: 2,
         VAR_CONNDROP: 0.0, VAR_ALPHA: 3, VAR_EF: 16, "ROUTING_DEBUG": False,
+        "BIDIRECTIONAL_NEIGHBORS": False, "RANDOM_GOSSIP": False,
     }
     cfg.update(extra)
     return cfg
@@ -311,6 +298,27 @@ def _aggregate(run_rows):
     return result
 
 
+def _aggregate_topology(run_rows):
+    rows = [r for r in run_rows if r]
+    if not rows:
+        return []
+    def _mean(key):
+        return round(float(np.mean([r[key] for r in rows])), 3)
+    return [{
+        "n_runs":                len(rows),
+        "deg_min":               int(min(r["deg_min"] for r in rows)),
+        "deg_mean":              _mean("deg_mean"),
+        "deg_max":               int(max(r["deg_max"] for r in rows)),
+        "reach_directed_mean":   _mean("reach_directed"),
+        "largest_scc_mean":      _mean("largest_scc"),
+        "reach_sym_mean":        _mean("reach_sym"),
+        "search_visited_mean":   _mean("search_visited"),
+        "search_reachable_mean": _mean("search_reachable"),
+        "search_overlap_mean":   _mean("search_overlap"),
+        "alive_count_min":       int(min(r["alive_count"] for r in rows)),
+    }]
+
+
 def run_condition(meta, cfg, regen):
     global _done
     _done += 1
@@ -318,18 +326,19 @@ def run_condition(meta, cfg, regen):
     set_config(**cfg)
     if regen and not generate_data():
         return False
-    run_rows = []
+    measure  = meta.pop("measure", "search")
     num_runs = meta.pop("num_runs", P["NUM_RUNS"])
+    run_rows = []
     for r in range(num_runs):
         set_config(SEED=BASE_SEED + r)
         try:
             start_network(meta["num_nodes"])
-            run_rows += run_evaluation()
+            run_rows += run_topology() if measure == "topology" else run_evaluation()
         except Exception as e:
             log(f"  Fehler: {e!r}")
         finally:
             stop_network()
-    rows = _aggregate(run_rows)
+    rows = _aggregate_topology(run_rows) if measure == "topology" else _aggregate(run_rows)
     for row in rows:
         row.update(meta)
         _all_rows.append(row)
@@ -337,102 +346,92 @@ def run_condition(meta, cfg, regen):
     log(f"  -> {len(rows)} Zeilen, gesamt {len(_all_rows)}.")
     return True
 
-def _ef_linear(n, frac=0.4): return max(16, round(frac * n))
-def _ef_log(n, c=8):         return max(16, round(c * math.log2(n)))
-def _ef_fixed(n):            return 16
-def _ef_his(n):             return int(10 + 2 * math.log2(n))
-EF_RULE_FUNCS = {"fixed16": _ef_fixed, "linear": _ef_linear, "log": _ef_log, "his": _ef_his}
-
-def _fanout_fixed2(n):             return 2
-def _fanout_root(n, c=2.0, p=3.0): return min(8, max(2, round(c * (n / 50.0) ** (1.0 / p))))
-FANOUT_RULE_FUNCS = {"fixed2": _fanout_fixed2, "root": _fanout_root}
-
-def _ttl_fixed6(n):     return 6
-def _ttl_log(n, c=1.0): return max(4, math.ceil(c * math.log2(n)))
-TTL_RULE_FUNCS = {"fixed6": _ttl_fixed6, "log": _ttl_log}
-
 def _adaptive_iter_cfg(ef):
     return {VAR_ROUTING: "iterative", VAR_ALPHA: 3, VAR_EF: ef}
 
 def build_adaptive_plan():
     plan = []
     ttl_const = P.get("ITER_TTL_CONST", 64)
-    ef_fixed  = P.get("WARMUP_CROSS_EF", 64)
     for ds in P.get("DATASETS", ["ir"]):
         total = _total_for(ds)
 
-        for n in P.get("WARMUP_CROSS_N", []):
-            for w in P.get("WARMUP_CROSS_VALUES", []):
-                m = _meta("adaptive_warmup", "clustered", "iterative", n, total // n, 0, True, "none", ds)
-                m["routing_ef"] = ef_fixed; m["ttl_mode"] = f"fixed{ttl_const}"; m["gossip_warmup_s"] = w
-                m["num_runs"] = P.get("WARMUP_CROSS_RUNS", 12)
-                c = base_cfg(n, [ttl_const], P["NUM_QUERIES"], total, DATASET=ds,
-                             **{VAR_ROUTING: "iterative", VAR_ALPHA: 3, VAR_EF: ef_fixed, VAR_WARMUP: w})
-                plan.append((m, c, False))
-
         for n in P.get("EF_SWEEP_N", []):
             for ef in P.get("EF_SWEEP_VALUES", []):
-                m = _meta("adaptive_ef", "clustered", "iterative", n, total // n, 0, True, "none", ds)
+                m = _meta("ef_sweep", "clustered", "iterative", n, total // n, 0, True, "none", ds)
                 m["routing_ef"] = ef; m["ttl_mode"] = f"fixed{ttl_const}"
                 m["num_runs"] = P.get("EF_SWEEP_RUNS", P["NUM_RUNS"])
                 c = base_cfg(n, [ttl_const], P["NUM_QUERIES"], total,
                              DATASET=ds, **_adaptive_iter_cfg(ef))
                 plan.append((m, c, False))
 
-        for n in P.get("FANOUT_SWEEP_N", []):
-            for fan in P.get("FANOUT_SWEEP_VALUES", []):
-                m = _meta("adaptive_fanout", "clustered", "greedy", n, total // n, 0, True, "none", ds)
-                m["fanout"] = fan
-                m["num_runs"] = P.get("FANOUT_SWEEP_RUNS", P["NUM_RUNS"])
-                c = base_cfg(n, P.get("FANOUT_SWEEP_TTL", [6]), P["NUM_QUERIES"], total,
-                             DATASET=ds, **{VAR_ROUTING: "greedy", VAR_FANOUT: fan})
+        ef_warm = P.get("WARMUP_CROSS_EF", 64)
+        for n in P.get("WARMUP_CROSS_N", []):
+            for w in P.get("WARMUP_CROSS_VALUES", []):
+                m = _meta("warmup", "clustered", "iterative", n, total // n, 0, True, "none", ds)
+                m["routing_ef"] = ef_warm; m["ttl_mode"] = f"fixed{ttl_const}"; m["gossip_warmup_s"] = w
+                m["num_runs"] = P.get("WARMUP_CROSS_RUNS", P["NUM_RUNS"])
+                c = base_cfg(n, [ttl_const], P["NUM_QUERIES"], total, DATASET=ds,
+                             **{VAR_ROUTING: "iterative", VAR_ALPHA: 3, VAR_EF: ef_warm, VAR_WARMUP: w})
                 plan.append((m, c, False))
 
+        ef_alpha = P.get("ALPHA_EF", 64)
         for n in P.get("ALPHA_TEST_N", []):
-            heavy = n <= 200
-            ef = _ef_his(n)
             for a in P.get("ALPHA_VALUES", []):
-                m = _meta("adaptive_alpha", "clustered", "iterative", n, total // n, 0, True, "none", ds)
-                m["routing_ef"] = ef; m["ttl_mode"] = f"fixed{ttl_const}"; m["routing_alpha"] = a
-                m["num_runs"] = P["NUM_RUNS"] if heavy else 3
+                m = _meta("alpha", "clustered", "iterative", n, total // n, 0, True, "none", ds)
+                m["routing_ef"] = ef_alpha; m["ttl_mode"] = f"fixed{ttl_const}"; m["routing_alpha"] = a
+                m["num_runs"] = P.get("ALPHA_RUNS", P["NUM_RUNS"])
                 c = base_cfg(n, [ttl_const], P["NUM_QUERIES"], total,
-                             DATASET=ds, **{VAR_ROUTING: "iterative", VAR_ALPHA: a, VAR_EF: ef})
+                             DATASET=ds, **{VAR_ROUTING: "iterative", VAR_ALPHA: a, VAR_EF: ef_alpha})
                 plan.append((m, c, False))
 
+        ttl_scale = P.get("SCALE_TTL_VALUE", 8)
+        ef_scale  = P.get("SCALE_TTL_EF", 16)
         for n in P.get("SCALE_TTL_N", []):
-            ttl_val = P.get("SCALE_TTL_VALUE", 8)
-            for routing in ["greedy", "flood", "iterative"]:
-                m = _meta("scale_ttl", "clustered", routing, n, total // n, 0, True, "none", ds)
-                m["num_runs"] = P.get("SCALE_TTL_RUNS", P["NUM_RUNS"])
-                c = base_cfg(n, [ttl_val], P["NUM_QUERIES"], total,
-                             DATASET=ds, **{VAR_ROUTING: routing}, **_iter(routing))
-                plan.append((m, c, False))
+            m = _meta("scale_ttl", "clustered", "iterative", n, total // n, 0, True, "none", ds)
+            m["routing_ef"] = ef_scale; m["ttl_mode"] = f"fixed{ttl_scale}"
+            m["num_runs"] = P.get("SCALE_TTL_RUNS", P["NUM_RUNS"])
+            c = base_cfg(n, [ttl_scale], P["NUM_QUERIES"], total,
+                         DATASET=ds, **_adaptive_iter_cfg(ef_scale))
+            plan.append((m, c, False))
 
-        for n in P.get("EF_RULE_N", []):
-            heavy = n <= 200
-            for rule in P.get("EF_RULES", []):
-                ef = EF_RULE_FUNCS[rule](n)
-                for tmode in P.get("EF_RULE_TTL_MODES", ["coupled"]):
-                    ttl = 6 if tmode == "fixed6" else (ef if tmode == "coupled" else ef + 8)
-                    m = _meta("adaptive_ef_rule", "clustered", "iterative", n, total // n, 0, True, "none", ds)
-                    m["routing_ef"] = ef; m["ef_rule"] = rule; m["ttl_mode"] = tmode
-                    m["num_runs"] = P["NUM_RUNS"] if heavy else 3
-                    c = base_cfg(n, [ttl], P["NUM_QUERIES"], total,
-                                 DATASET=ds, **_adaptive_iter_cfg(ef))
-                    plan.append((m, c, False))
+        for n in P.get("TOPOLOGY_N", []):
+            m = _meta("topology", "clustered", "none", n, total // n, 0, True, "none", ds)
+            m["measure"] = "topology"
+            m["num_runs"] = P.get("TOPOLOGY_RUNS", P["NUM_RUNS"])
+            c = base_cfg(n, [ttl_const], P["NUM_QUERIES"], total, DATASET=ds,
+                         **_adaptive_iter_cfg(P.get("CONNFIX_EF", 64)))
+            plan.append((m, c, False))
 
-        for n in P.get("FANOUT_RULE_N", []):
-            heavy = n <= 200
-            for rule in P.get("FANOUT_RULES", []):
-                fan = FANOUT_RULE_FUNCS[rule](n)
-                m = _meta("adaptive_fanout_rule", "clustered", "greedy", n, total // n, 0, True, "none", ds)
-                m["fanout"] = fan; m["fanout_rule"] = rule
-                m["num_runs"] = P["NUM_RUNS"] if heavy else 3
-                c = base_cfg(n, P.get("FANOUT_RULE_TTL", [6]), P["NUM_QUERIES"], total,
-                             DATASET=ds, **{VAR_ROUTING: "greedy", VAR_FANOUT: fan})
-                plan.append((m, c, False))
+        cf_ef     = P.get("CONNFIX_EF", 64)
+        cf_alpha  = P.get("CONNFIX_ALPHA", 3)
+        cf_ttl    = P.get("CONNFIX_TTL", 64)
+        cf_runs   = P.get("CONNFIX_RUNS", 8)
+        cf_nq_lrg = P.get("CONNFIX_NQ_LARGE", P["NUM_QUERIES"])
+        cf_cells  = P.get("CONNFIX_CELLS", [])
+        combos    = [(False, False), (True, False), (False, True), (True, True)]
+
+        def _connfix_cell(block, n, warmup, bidir, rgossip, ttl_v):
+            nq = P["NUM_QUERIES"] if n <= 200 else cf_nq_lrg
+            m = _meta(block, "clustered", "iterative", n, total // n, 0, True, "none", ds)
+            m["routing_ef"] = cf_ef; m["routing_alpha"] = cf_alpha
+            m["ttl_mode"] = f"fixed{ttl_v}"; m["gossip_warmup_s"] = warmup
+            m["bidirectional"] = bidir; m["random_gossip"] = rgossip
+            m["num_runs"] = cf_runs
+            c = base_cfg(n, [ttl_v], nq, total, DATASET=ds,
+                         **{VAR_ROUTING: "iterative", VAR_ALPHA: cf_alpha, VAR_EF: cf_ef, VAR_WARMUP: warmup},
+                         BIDIRECTIONAL_NEIGHBORS=bidir, RANDOM_GOSSIP=rgossip)
+            return (m, c, False)
+
+        for (n, warmup) in cf_cells:
+            for (bidir, rgossip) in combos:
+                plan.append(_connfix_cell("connfix", n, warmup, bidir, rgossip, cf_ttl))
+
+        for ttl_v in P.get("CONNFIX_TTL_PROBE_VALUES", [6, 64]):
+            for (n, warmup) in cf_cells:
+                plan.append(_connfix_cell("connfix_ttl_probe", n, warmup, True, True, ttl_v))
 
     return plan
+
 
 def _block_active(name):
     sel = P.get("RUN_BLOCKS")
@@ -570,7 +569,8 @@ def main():
     signal.signal(signal.SIGINT,  lambda s, f: (stop_network(), stop_toxiproxy(), sys.exit(1)))
     signal.signal(signal.SIGTERM, lambda s, f: (stop_network(), stop_toxiproxy(), sys.exit(1)))
 
-    start_toxiproxy()
+    if not P.get("ADAPTIVE_ONLY", False):
+        start_toxiproxy()
 
     plan = build_plan()
     _total = len(plan)

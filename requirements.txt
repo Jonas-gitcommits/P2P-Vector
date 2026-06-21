@@ -3,6 +3,7 @@ grpcio-tools
 numpy
 faiss-cpu
 scipy
+networkx
 matplotlib
 pandas
 datasets

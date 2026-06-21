@@ -290,5 +290,103 @@ def run_evaluation():
     return rows
 
 
+def run_topology():
+    import config as _cfg
+    importlib.reload(_cfg)
+    from config import (
+        NUM_NODES, REAL_PORT_START, GOSSIP_WARMUP_S, DIMENSION,
+        FAULT_INJECTION_ENABLED, FAULT_MAX_DOWN, K, TTL_VALUES, SEED,
+    )
+    import networkx as nx
+
+    probe_nodes = [f"127.0.0.1:{REAL_PORT_START + i}" for i in range(NUM_NODES)]
+
+    required = NUM_NODES - (FAULT_MAX_DOWN if FAULT_INJECTION_ENABLED else 0)
+    ready_deadline = 180.0
+    ready_start = time.time()
+    while True:
+        alive = get_alive_nodes(probe_nodes)
+        if len(alive) >= required or time.time() - ready_start >= ready_deadline:
+            break
+        time.sleep(2)
+
+    if GOSSIP_WARMUP_S > 0:
+        print(f"Warte {GOSSIP_WARMUP_S}s für Gossip-Konvergenz...")
+        time.sleep(GOSSIP_WARMUP_S)
+
+    alive_nodes = get_alive_nodes(probe_nodes)
+    print(f"Topologie-Schnappschuss: {len(alive_nodes)}/{NUM_NODES} Knoten erreichbar.")
+    if not alive_nodes:
+        print("Keine Knoten erreichbar! Abbruch.")
+        return []
+
+    node_set = set(alive_nodes)
+    dummy = np.zeros(DIMENSION, dtype=np.float32).tobytes()
+    G = nx.DiGraph()
+    G.add_nodes_from(alive_nodes)
+    for n in alive_nodes:
+        channel = grpc.insecure_channel(n)
+        try:
+            stub = p2p_pb2_grpc.VectorStoreStub(channel)
+            req = p2p_pb2.QueryNodeRequest(query=p2p_pb2.Vector(values=dummy), k=1)
+            resp = stub.QueryNode(req, timeout=3.0)
+            for nb in resp.neighbors:
+                if nb.target in node_set:
+                    G.add_edge(n, nb.target)
+        except grpc.RpcError:
+            pass
+        finally:
+            channel.close()
+
+    entry = alive_nodes[0]
+    degrees = [G.out_degree(n) for n in alive_nodes]
+    reachable_set = nx.descendants(G, entry) | {entry}
+    reach_directed = len(reachable_set)
+    largest_scc = max((len(c) for c in nx.strongly_connected_components(G)), default=0)
+    reach_sym = len(nx.node_connected_component(G.to_undirected(), entry))
+
+    print(f"  Knotengrad min/mean/max = {min(degrees)}/{np.mean(degrees):.2f}/{max(degrees)}  "
+          f"erreichbar(gerichtet)={reach_directed}  groesste_SCC={largest_scc}  "
+          f"erreichbar(symmetrisiert)={reach_sym}")
+
+    rng = random.Random(SEED)
+    if os.path.exists("queries.npy"):
+        all_queries = np.load("queries.npy").astype(np.float32)
+        query_vec = all_queries[rng.randrange(len(all_queries))]
+    else:
+        query_vec = np.array([rng.gauss(0, 1) for _ in range(DIMENSION)], dtype=np.float32)
+    ttl = TTL_VALUES[0] if TTL_VALUES else 64
+    fanout_k = max(K * 4, 20)
+    visited_count = search_overlap = 0
+    channel = grpc.insecure_channel(entry)
+    try:
+        stub = p2p_pb2_grpc.VectorStoreStub(channel)
+        resp = stub.SearchSimilar(make_request(query_vec, K, ttl, fanout_k),
+                                  timeout=30.0)
+        visited_set = set(resp.visited_nodes)
+        visited_count = len(visited_set)
+        search_overlap = len(visited_set & reachable_set)
+    except grpc.RpcError as e:
+        print(f"  Topologie-Suche fehlgeschlagen: {e.code()}")
+    finally:
+        channel.close()
+
+    print(f"  Suche vom Einstiegsknoten: |besucht|={visited_count}  "
+          f"|erreichbar|={reach_directed}  Schnittmenge={search_overlap}")
+
+    return [{
+        "deg_min":          int(min(degrees)),
+        "deg_mean":         round(float(np.mean(degrees)), 3),
+        "deg_max":          int(max(degrees)),
+        "reach_directed":   int(reach_directed),
+        "largest_scc":      int(largest_scc),
+        "reach_sym":        int(reach_sym),
+        "search_visited":   int(visited_count),
+        "search_reachable": int(reach_directed),
+        "search_overlap":   int(search_overlap),
+        "alive_count":      len(alive_nodes),
+    }]
+
+
 if __name__ == "__main__":
     run_evaluation()

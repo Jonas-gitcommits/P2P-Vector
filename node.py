@@ -204,6 +204,10 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
         return response
 
     async def Ping(self, request, context):
+        if (request.register and request.sender_port > 0
+                and not (request.sender_ip == "127.0.0.1"
+                         and request.sender_port == self.port)):
+            self.local_graph.add_neighbor_edge(request.sender_ip, request.sender_port)
         summary_bytes, summary_count = await self.local_graph.compute_summary()
         return p2p_pb2.PingResponse(
             alive=True,
