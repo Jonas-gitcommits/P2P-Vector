@@ -8,7 +8,9 @@ from config import (
     GOSSIP_INTERVAL_S, HEALTH_CHECK_INTERVAL_S, PING_TIMEOUT_S,
     RPC_TIMEOUT_BASE_S, LATENCY_PRESETS, LATENCY_SCENARIO, ROUTING_ALPHA,
     ROUTING_EF, ROUTING_DEBUG, ROUTING_FANOUT, BIDIRECTIONAL_NEIGHBORS,
-    RANDOM_GOSSIP,
+    RANDOM_GOSSIP, LOOP_JITTER, FAILURE_STRIKES,
+    BOUNDED_VIEW, MAX_NEIGHBORS, EXPLORE_FRACTION, PEER_SHUFFLE,
+    FARTHEST_ANCHOR, FAR_RANDOM_BIAS,
 )
 
 class DistributedRouter:
@@ -17,6 +19,8 @@ class DistributedRouter:
         self.my_port = my_port
         self._channel_pool = {}
         self.rng = rng or random.Random()
+        self._ping_failures = {}
+        self._reference_vector = None
 
     def _get_channel(self, target: str):
         if target not in self._channel_pool:
@@ -242,6 +246,14 @@ class DistributedRouter:
 
         return {"peers": final[:k], "rpc_count": rpc_count, "visited_nodes": visited_nodes}
 
+    def _get_reference_vector(self, local_graph):
+        if self._reference_vector is None:
+            n = local_graph.local_index.ntotal
+            if n > 0:
+                vecs = local_graph.local_index.reconstruct_n(0, n)
+                self._reference_vector = np.asarray(vecs, dtype=np.float32).mean(axis=0)
+        return self._reference_vector
+
     def _reseed_if_isolated(self, local_graph):
         if local_graph.neighbors:
             return
@@ -250,6 +262,8 @@ class DistributedRouter:
                 local_graph.add_neighbor_edge(self.my_ip, seed_port)
 
     async def start_gossip_loop(self, local_graph):
+        if LOOP_JITTER:
+            await asyncio.sleep(self.rng.uniform(0.0, GOSSIP_INTERVAL_S))
         while True:
             await asyncio.sleep(GOSSIP_INTERVAL_S)
             self._reseed_if_isolated(local_graph)
@@ -307,7 +321,39 @@ class DistributedRouter:
             except Exception:
                 pass
 
+            
+            # Angelehnt an [jelasity2007peersampling].
+            if PEER_SHUFFLE:
+                seed_targets = {f"{self.my_ip}:{p}" for p in local_graph.bootstrap_seeds}
+                shuffle_candidates = [
+                    t for t in local_graph.neighbors
+                    if t != my_target and t not in seed_targets
+                ]
+                if shuffle_candidates:
+                    shuffle_target = self.rng.choice(shuffle_candidates)
+                    try:
+                        dummy_vec = [0.0] * local_graph.dimension
+                        result = await self.query_node(shuffle_target, dummy_vec, k=1)
+                        if result and result.get("neighbor_summaries"):
+                            remote = [p for p in result["neighbor_summaries"].keys()
+                                      if p != my_target]
+                            if remote:
+                                count = min(self.rng.randint(1, 2), len(remote))
+                                for peer_addr in self.rng.sample(remote, count):
+                                    parts = peer_addr.split(":")
+                                    if len(parts) != 2:
+                                        continue
+                                    rip, rport = parts[0], int(parts[1])
+                                    is_new = peer_addr not in local_graph.neighbors
+                                    local_graph.add_neighbor_edge(rip, rport)
+                                    if BIDIRECTIONAL_NEIGHBORS and is_new:
+                                        asyncio.create_task(self.announce_peer(peer_addr))
+                    except Exception:
+                        pass
+
     async def health_check_loop(self, local_graph):
+        if LOOP_JITTER:
+            await asyncio.sleep(self.rng.uniform(0.0, HEALTH_CHECK_INTERVAL_S))
         while True:
             await asyncio.sleep(HEALTH_CHECK_INTERVAL_S)
 
@@ -327,11 +373,15 @@ class DistributedRouter:
             dead_targets = []
             for target, response in results:
                 if response is None:
-                    dead_targets.append(target)
-                elif response.summary_count > 0 and response.summary:
-                    local_graph.neighbors[target] = np.frombuffer(
-                        response.summary, dtype=np.float32
-                    ).reshape(response.summary_count, -1).copy()
+                    self._ping_failures[target] = self._ping_failures.get(target, 0) + 1
+                    if self._ping_failures[target] >= FAILURE_STRIKES:
+                        dead_targets.append(target)
+                else:
+                    self._ping_failures[target] = 0
+                    if response.summary_count > 0 and response.summary:
+                        local_graph.neighbors[target] = np.frombuffer(
+                            response.summary, dtype=np.float32
+                        ).reshape(response.summary_count, -1).copy()
 
             for target in dead_targets:
                 if target in local_graph.neighbors:
@@ -339,5 +389,43 @@ class DistributedRouter:
                 if target in self._channel_pool:
                     await self._channel_pool[target].close()
                     del self._channel_pool[target]
+                self._ping_failures.pop(target, None)
+
+            # Angelehnt an [jelasity2007peersampling], [voulgaris2005cyclon].
+            if BOUNDED_VIEW and len(local_graph.neighbors) > MAX_NEIGHBORS:
+                ref = self._get_reference_vector(local_graph)
+
+                def _nb_dist(t):
+                    s = local_graph.neighbors[t]
+                    if s is None or ref is None:
+                        return float("inf")
+                    return float(np.min(np.sum((s - ref) ** 2, axis=1)))
+
+                K_rand = round(EXPLORE_FRACTION * MAX_NEIGHBORS)
+                K_sim = MAX_NEIGHBORS - K_rand
+
+                ranked = sorted(local_graph.neighbors.keys(), key=_nb_dist)
+                keep = set(ranked[:K_sim])           
+                rest = ranked[K_sim:]               
+
+                pool = list(rest)
+                slots = K_rand
+                if FARTHEST_ANCHOR and slots > 0 and pool:
+                    keep.add(pool.pop())            
+                    slots -= 1
+                if slots > 0 and pool:
+                    if FAR_RANDOM_BIAS:
+                        far_half = pool[len(pool) // 2:]   
+                        keep.update(self.rng.sample(far_half, min(slots, len(far_half))))
+                    else:
+                        keep.update(self.rng.sample(pool, min(slots, len(pool))))
+
+                evict = [t for t in local_graph.neighbors if t not in keep]
+                for target in evict:
+                    del local_graph.neighbors[target]
+                    if target in self._channel_pool:
+                        await self._channel_pool[target].close()
+                        del self._channel_pool[target]
+                    self._ping_failures.pop(target, None)
 
             self._reseed_if_isolated(local_graph)

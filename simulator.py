@@ -10,6 +10,7 @@ from config import (
     FAULT_INJECTION_ENABLED, FAULT_KILL_INTERVAL, FAULT_KILL_PROBABILITY,
     FAULT_MAX_DOWN, FAULT_RESTART_DELAY, FAULT_SEED,
     LATENCY_SCENARIO, SEED,
+    INCREMENTAL_START, NODE_START_DELAY_S,
 )
 
 processes = []
@@ -33,6 +34,8 @@ def start_network():
     for i in range(NUM_NODES):
         cmd = _make_cmd(i)
         processes.append([subprocess.Popen(cmd), cmd])
+        if INCREMENTAL_START:
+            time.sleep(NODE_START_DELAY_S)
 
     print("Netzwerk hochgefahren! Warte auf Initialisierung...")
     time.sleep(3)

@@ -73,6 +73,166 @@ def make_request(query_vector, k, ttl, fanout_k, early_stop_threshold=0.0):
     )
 
 
+# Angelehnt an [tarjan1972scc].
+def _strongly_connected_components(nodes, adj):
+    visited = set()
+    order = []
+    for start in nodes:
+        if start in visited:
+            continue
+        stack = [(start, iter(adj.get(start, ())))]
+        visited.add(start)
+        while stack:
+            node, it = stack[-1]
+            pushed = False
+            for nb in it:
+                if nb not in visited:
+                    visited.add(nb)
+                    stack.append((nb, iter(adj.get(nb, ()))))
+                    pushed = True
+                    break
+            if not pushed:
+                order.append(node)
+                stack.pop()
+    radj = {v: set() for v in nodes}
+    for u in nodes:
+        for v in adj.get(u, ()):
+            if v in radj:
+                radj[v].add(u)
+    seen = set()
+    comps = []
+    for start in reversed(order):
+        if start in seen:
+            continue
+        comp = []
+        stack = [start]
+        seen.add(start)
+        while stack:
+            node = stack.pop()
+            comp.append(node)
+            for nb in radj.get(node, ()):
+                if nb not in seen:
+                    seen.add(nb)
+                    stack.append(nb)
+        comps.append(comp)
+    return comps
+
+
+def _reachable_count(start, adj, node_set):
+    seen = {start}
+    stack = [start]
+    while stack:
+        u = stack.pop()
+        for v in adj.get(u, ()):
+            if v in node_set and v not in seen:
+                seen.add(v)
+                stack.append(v)
+    return len(seen)
+
+
+# Angelehnt an [jelasity2007peersampling].
+def _compute_topology_metrics(adj, nodes):
+    n_alive = len(nodes)
+    if n_alive == 0:
+        return None
+    node_set = set(nodes)
+
+    indeg = {v: 0 for v in nodes}
+    for u in nodes:
+        for v in adj.get(u, ()):
+            if v in indeg:
+                indeg[v] += 1
+    indeg_vals = list(indeg.values())
+
+    try:
+        import networkx as nx
+        G = nx.DiGraph()
+        G.add_nodes_from(nodes)
+        for u in nodes:
+            for v in adj.get(u, ()):
+                if v in node_set:
+                    G.add_edge(u, v)
+        reach_fracs = [(len(nx.descendants(G, n)) + 1) / n_alive for n in nodes]
+        scc_sizes = [len(c) for c in nx.strongly_connected_components(G)]
+       
+        comp_size = {}
+        for comp in nx.connected_components(G.to_undirected()):
+            for n in comp:
+                comp_size[n] = len(comp)
+        reach_sym_fracs = [comp_size[n] / n_alive for n in nodes]
+    except ImportError:
+        reach_fracs = [_reachable_count(n, adj, node_set) / n_alive for n in nodes]
+        scc_sizes = [len(c) for c in _strongly_connected_components(nodes, adj)]
+        sadj = {v: set() for v in nodes}
+        for u in nodes:
+            for v in adj.get(u, ()):
+                if v in sadj:
+                    sadj[u].add(v)
+                    sadj[v].add(u)
+        comp_size = {}
+        seen = set()
+        for s in nodes:
+            if s in seen:
+                continue
+            comp = [s]
+            seen.add(s)
+            stack = [s]
+            while stack:
+                x = stack.pop()
+                for y in sadj[x]:
+                    if y not in seen:
+                        seen.add(y)
+                        comp.append(y)
+                        stack.append(y)
+            for x in comp:
+                comp_size[x] = len(comp)
+        reach_sym_fracs = [comp_size[n] / n_alive for n in nodes]
+
+    largest_scc = max(scc_sizes, default=0)
+    return {
+        "reach_mean":       round(float(np.mean(reach_fracs)), 4),
+        "reach_min":        round(float(min(reach_fracs)), 4),
+        "reach_sym":        round(float(np.mean(reach_sym_fracs)), 4),
+        "largest_scc_frac": round(largest_scc / n_alive, 4),
+        "num_scc":          len(scc_sizes),
+        "indeg_mean":       round(float(np.mean(indeg_vals)), 4),
+        "indeg_max":        int(max(indeg_vals)) if indeg_vals else 0,
+    }
+
+
+def _cross_cluster_frac(adj, dataset, port_start, num_nodes, dimension, coarse_k):
+    try:
+        partition = np.load("partition.npy")
+    except FileNotFoundError:
+        return None
+    ds = dataset[:len(partition)]
+    node_ref = np.zeros((num_nodes, dimension), dtype=np.float32)
+    for k in range(num_nodes):
+        mask = partition == k
+        if mask.any():
+            node_ref[k] = ds[mask].mean(axis=0)
+
+    k = min(coarse_k, num_nodes)
+    if k < 1:
+        return None
+    kmeans = faiss.Kmeans(dimension, k, niter=20, verbose=False, seed=42)
+    kmeans.train(np.ascontiguousarray(node_ref))
+    _, labels = kmeans.index.search(np.ascontiguousarray(node_ref), 1)
+    region = labels.ravel()
+
+    def _region_of(addr):
+        return region[int(addr.split(":")[1]) - port_start]
+
+    total = cross = 0
+    for i_addr, outs in adj.items():
+        ri = _region_of(i_addr)
+        for j_addr in outs:
+            total += 1
+            if _region_of(j_addr) != ri:
+                cross += 1
+    return round(cross / total, 4) if total else 0.0
+
+
 def run_evaluation():
     import config as _cfg
     importlib.reload(_cfg)
@@ -81,7 +241,7 @@ def run_evaluation():
         TOXIPROXY_ENABLED, PROXY_PORT_START, REAL_PORT_START,
         NUM_QUERIES, NUM_RUNS, K, TTL_VALUES, DIMENSION, GOSSIP_WARMUP_S,
         DATASET, LATENCY_SCENARIO, LATENCY_PRESETS, SEED, ROUTING_STRATEGY,
-        FAULT_INJECTION_ENABLED, FAULT_MAX_DOWN,
+        FAULT_INJECTION_ENABLED, FAULT_MAX_DOWN, MEASURE_TOPOLOGY, TOPO_COARSE_K,
     )
 
     early_stop_threshold = EARLY_STOP_THRESHOLD if EARLY_STOP_ENABLED else 0.0
@@ -143,6 +303,33 @@ def run_evaluation():
               f"(min={nb_min}, max={nb_max})")
     else:
         nb_mean = nb_min = nb_max = None
+
+    topo_metrics = None
+    if MEASURE_TOPOLOGY:
+        dummy = np.zeros(DIMENSION, dtype=np.float32).tobytes()
+        node_set = set(alive_nodes)
+        adj = {}
+        for node in alive_nodes:
+            try:
+                resp = stubs[node].QueryNode(
+                    p2p_pb2.QueryNodeRequest(query=p2p_pb2.Vector(values=dummy), k=1),
+                    timeout=3.0,
+                )
+                adj[node] = {nb.target for nb in resp.neighbors if nb.target in node_set}
+            except grpc.RpcError:
+                adj[node] = set()
+        topo_metrics = _compute_topology_metrics(adj, alive_nodes)
+        if topo_metrics is not None:
+            topo_metrics["cross_cluster_frac"] = _cross_cluster_frac(
+                adj, dataset, port_start, NUM_NODES, DIMENSION, TOPO_COARSE_K)
+            print(f"Topologie: reach_mean={topo_metrics['reach_mean']:.3f} "
+                  f"reach_min={topo_metrics['reach_min']:.3f} "
+                  f"reach_sym={topo_metrics['reach_sym']:.3f} "
+                  f"largest_scc_frac={topo_metrics['largest_scc_frac']:.3f} "
+                  f"num_scc={topo_metrics['num_scc']} "
+                  f"indeg_mean={topo_metrics['indeg_mean']:.2f} "
+                  f"indeg_max={topo_metrics['indeg_max']} "
+                  f"cross_cluster_frac={topo_metrics['cross_cluster_frac']}")
 
     fanout_k = max(K * 4, 20)
     lat_ms, jitter_ms = LATENCY_PRESETS.get(LATENCY_SCENARIO, (0, 0))
@@ -285,6 +472,14 @@ def run_evaluation():
             "neighbor_count_mean":         round(nb_mean, 2) if nb_mean is not None else None,
             "neighbor_count_min":          nb_min,
             "neighbor_count_max":          nb_max,
+            "reach_mean":                  topo_metrics["reach_mean"]         if topo_metrics else None,
+            "reach_min":                   topo_metrics["reach_min"]          if topo_metrics else None,
+            "reach_sym":                   topo_metrics["reach_sym"]          if topo_metrics else None,
+            "largest_scc_frac":            topo_metrics["largest_scc_frac"]   if topo_metrics else None,
+            "num_scc":                     topo_metrics["num_scc"]            if topo_metrics else None,
+            "indeg_mean":                  topo_metrics["indeg_mean"]         if topo_metrics else None,
+            "indeg_max":                   topo_metrics["indeg_max"]          if topo_metrics else None,
+            "cross_cluster_frac":          topo_metrics["cross_cluster_frac"] if topo_metrics else None,
             "_lat_samples":                list(rd["all_lats"]),
         })
     return rows

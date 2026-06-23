@@ -1,4 +1,4 @@
-import os, re, sys, csv, time, signal, subprocess, urllib.request
+import os, re, sys, csv, time, signal, subprocess, urllib.request, math
 from datetime import datetime
 import numpy as np
 from scipy.stats import t as _t_dist
@@ -7,7 +7,7 @@ from evaluate import run_evaluation, run_topology
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY   = sys.executable
 
-PROFILE    = "extra"
+PROFILE    = "rebuild_bidir"
 SMOKE_TEST = False
 
 IR_CORPUS_SIZE = 200_000
@@ -51,6 +51,59 @@ PROFILES = {
         CONNFIX_NQ_LARGE=150,
         CONNFIX_CELLS=[(100, 10), (200, 40), (500, 50), (1000, 60), (1500, 60)],
         CONNFIX_TTL_PROBE_VALUES=[6, 64],
+    ),
+    "rebuild_pilot": dict(
+        DATASETS=["ir"], TOTAL_VECTORS=20000, N_BASE=500,
+        NUM_QUERIES=300, NUM_QUERIES_LATENCY=200, NUM_RUNS=4,
+        GOSSIP_WARMUP_S=60, NETWORK_BOOT_WAIT=12,
+        REBUILD_ONLY=True,
+        REBUILD_GRID_N=[500, 1000],
+        REBUILD_EXPLORE_FRACTIONS=[0.667],
+        REBUILD_COEFFS=[2.0],
+        REBUILD_NQ_LARGE=150,
+        REBUILD_ABLATION_N=[], REBUILD_ABLATION_ARMS=[],
+        REBUILD_ABLATION_FRACTION=0.667, REBUILD_ABLATION_COEFF=2.0,
+        REBUILD_OLDRPS_N=[500, 1000],
+        REBUILD_RUNS_BY_N={500: 4, 1000: 4},
+        REBUILD_EF_BASE=10, REBUILD_EF_PER_LOG2N=2,
+    ),
+    "rebuild_focus": dict(
+        DATASETS=["ir"], TOTAL_VECTORS=20000, N_BASE=500,
+        NUM_QUERIES=300, NUM_QUERIES_LATENCY=200, NUM_RUNS=5,
+        GOSSIP_WARMUP_S=60, NETWORK_BOOT_WAIT=12, REBUILD_ONLY=True,
+        REBUILD_SWEEP_N=[500, 1000],
+        REBUILD_EXPLORE_FRACTIONS=[0.5, 0.667, 0.75],
+        REBUILD_COEFFS=[1.0, 2.0],
+        REBUILD_ANCHOR_N=[200, 1500],
+        REBUILD_ANCHOR_FRACTIONS=[0.667],
+        REBUILD_ANCHOR_COEFFS=[1.0, 2.0],
+        REBUILD_NQ_LARGE=150,
+        REBUILD_ABLATION_N=[500],
+        REBUILD_ABLATION_ARMS=["stageb_anchor", "stageb", "with_far_bias", "no_shuffle", "no_bounded", "bidir"],
+        REBUILD_ABLATION_FRACTION=0.667, REBUILD_ABLATION_COEFF=2.0,
+        REBUILD_OLDRPS_N=[500, 1000],
+        REBUILD_RUNS_BY_N={200: 8, 500: 5, 1000: 5, 1500: 3},
+        REBUILD_EF_BASE=10, REBUILD_EF_PER_LOG2N=2,
+    ),
+    "rebuild_bidir": dict(
+        DATASETS=["ir"], TOTAL_VECTORS=20000, N_BASE=500,
+        NUM_QUERIES=300, NUM_QUERIES_LATENCY=200, NUM_RUNS=5,
+        GOSSIP_WARMUP_S=60, NETWORK_BOOT_WAIT=12, REBUILD_ONLY=True,
+        REBUILD_SWEEP_N=[],
+        REBUILD_EXPLORE_FRACTIONS=[0.667],
+        REBUILD_COEFFS=[2.0],
+        REBUILD_ANCHOR_N=[500, 1000, 1500],
+        REBUILD_ANCHOR_FRACTIONS=[0.667],
+        REBUILD_ANCHOR_COEFFS=[2.0],
+        REBUILD_GRID_FLAGS=dict(BOUNDED_VIEW=True, PEER_SHUFFLE=True,
+                                BIDIRECTIONAL_NEIGHBORS=True,
+                                FARTHEST_ANCHOR=False, FAR_RANDOM_BIAS=False),
+        REBUILD_NQ_LARGE=150,
+        REBUILD_ABLATION_N=[], REBUILD_ABLATION_ARMS=[],
+        REBUILD_ABLATION_FRACTION=0.667, REBUILD_ABLATION_COEFF=2.0,
+        REBUILD_OLDRPS_N=[],
+        REBUILD_RUNS_BY_N={500: 5, 1000: 5, 1500: 3},
+        REBUILD_EF_BASE=10, REBUILD_EF_PER_LOG2N=2,
     ),
 }
 P = PROFILES[PROFILE]
@@ -97,7 +150,7 @@ def _meta(block, placement, routing, n, vpn, fmd, repl, scen, dataset):
                 latency_scenario=scen, dataset=dataset)
 
 def meta_str(m):
-    extra = "".join(f" {k}={m[k]}" for k in ("fanout", "gossip_warmup_s", "conn_drop_pct", "early_stop", "routing_ef", "ef_rule", "ttl_mode", "routing_alpha", "fanout_rule", "ttl_rule", "bidirectional", "random_gossip") if k in m)
+    extra = "".join(f" {k}={m[k]}" for k in ("fanout", "gossip_warmup_s", "conn_drop_pct", "early_stop", "routing_ef", "ef_rule", "ttl_mode", "routing_alpha", "fanout_rule", "ttl_rule", "bidirectional", "random_gossip", "explore_fraction", "max_neighbors_coeff", "arm") if k in m)
     return (f"{m['block']} ds={m['dataset']} place={m['placement']} route={m['routing']} "
             f"N={m['num_nodes']} fault={m['fault_max_down']} repl={m['replication']} "
             f"lat={m['latency_scenario']}{extra}")
@@ -112,6 +165,10 @@ def base_cfg(n, ttl, nq, total, **extra):
         VAR_PLACEMENT: "clustered", VAR_ROUTING: "greedy", VAR_FANOUT: 2,
         VAR_CONNDROP: 0.0, VAR_ALPHA: 3, VAR_EF: 16, "ROUTING_DEBUG": False,
         "BIDIRECTIONAL_NEIGHBORS": False, "RANDOM_GOSSIP": False,
+        "BOUNDED_VIEW": False, "PEER_SHUFFLE": False, "FARTHEST_ANCHOR": False,
+        "FAR_RANDOM_BIAS": False, "INCREMENTAL_START": False, "LOOP_JITTER": False,
+        "FAILURE_STRIKES": 1, "MEASURE_TOPOLOGY": False,
+        "EXPLORE_FRACTION": 0.5, "MAX_NEIGHBORS_COEFF": 1.0,
     }
     cfg.update(extra)
     return cfg
@@ -237,6 +294,10 @@ def _aggregate(run_rows):
     def _mean(rows, key):
         return round(float(np.nanmean([float(r[key]) for r in rows])), 4)
 
+    def _topo_mean(rows, key):
+        vals = [float(r[key]) for r in rows if r.get(key) is not None]
+        return round(float(np.mean(vals)), 4) if vals else None
+
     def _ci(vals, lo_bound=None, hi_bound=None):
         lo, hi = _t_ci(vals)
         if lo_bound is not None and not np.isnan(lo):
@@ -294,6 +355,14 @@ def _aggregate(run_rows):
             "neighbor_count_mean":         round(float(np.mean(nbm_vals)), 2) if nbm_vals else None,
             "neighbor_count_min":          int(min(nbmin_vals)) if nbmin_vals else None,
             "neighbor_count_max":          int(max(nbmax_vals)) if nbmax_vals else None,
+            "reach_mean":                  _topo_mean(rows, "reach_mean"),
+            "reach_min":                   _topo_mean(rows, "reach_min"),
+            "reach_sym":                   _topo_mean(rows, "reach_sym"),
+            "largest_scc_frac":            _topo_mean(rows, "largest_scc_frac"),
+            "num_scc":                     _topo_mean(rows, "num_scc"),
+            "indeg_mean":                  _topo_mean(rows, "indeg_mean"),
+            "indeg_max":                   _topo_mean(rows, "indeg_max"),
+            "cross_cluster_frac":          _topo_mean(rows, "cross_cluster_frac"),
         })
     return result
 
@@ -433,6 +502,90 @@ def build_adaptive_plan():
     return plan
 
 
+def build_rebuild_plan():
+    plan = []
+    ds = "ir"
+    total = _total_for(ds)
+    common = dict(INCREMENTAL_START=True, LOOP_JITTER=True, FAILURE_STRIKES=3, MEASURE_TOPOLOGY=True)
+
+    def _ef(n):
+        return round(P["REBUILD_EF_BASE"] + P["REBUILD_EF_PER_LOG2N"] * math.log2(n))
+
+    def _runs(n):
+        return P["REBUILD_RUNS_BY_N"].get(n, P["NUM_RUNS"])
+
+    def _nq(n):
+        return P["NUM_QUERIES"] if n <= 200 else P["REBUILD_NQ_LARGE"]
+
+    def _cell(block, n, design, use_common=True, arm=None, frac=None, coeff=None):
+        ef = _ef(n)
+        m = _meta(block, "clustered", "iterative", n, total // n, 0, True, "none", ds)
+        m["routing_ef"] = ef
+        m["ttl_mode"] = f"fixed{ef}"
+        m["num_runs"] = _runs(n)
+        if frac is not None:
+            m["explore_fraction"] = frac
+        if coeff is not None:
+            m["max_neighbors_coeff"] = coeff
+        if arm is not None:
+            m["arm"] = arm
+        
+        c = base_cfg(n, [ef], _nq(n), total, DATASET=ds,
+                     **{VAR_ROUTING: "iterative", VAR_ALPHA: 3, VAR_EF: ef})
+        if use_common:
+            c.update(common)
+        c.update(design)
+        return (m, c, False)
+
+    
+
+    grid_flags = P.get("REBUILD_GRID_FLAGS",
+                       dict(BOUNDED_VIEW=True, PEER_SHUFFLE=True,
+                            FARTHEST_ANCHOR=True, FAR_RANDOM_BIAS=False))
+
+    for n in sorted(P.get("REBUILD_SWEEP_N", P.get("REBUILD_GRID_N", []))):
+        for frac in P["REBUILD_EXPLORE_FRACTIONS"]:
+            for coeff in P["REBUILD_COEFFS"]:
+                design = dict(grid_flags,
+                              EXPLORE_FRACTION=frac, MAX_NEIGHBORS_COEFF=coeff)
+                plan.append(_cell("rebuild_grid", n, design, frac=frac, coeff=coeff))
+
+
+    for n in sorted(P.get("REBUILD_ANCHOR_N", [])):
+        for frac in P.get("REBUILD_ANCHOR_FRACTIONS", []):
+            for coeff in P.get("REBUILD_ANCHOR_COEFFS", []):
+                design = dict(grid_flags,
+                              EXPLORE_FRACTION=frac, MAX_NEIGHBORS_COEFF=coeff)
+                plan.append(_cell("rebuild_grid", n, design, frac=frac, coeff=coeff))
+
+    
+    af, ac = P["REBUILD_ABLATION_FRACTION"], P["REBUILD_ABLATION_COEFF"]
+    arm_flags = {
+        "stageb_anchor": dict(BOUNDED_VIEW=True,  PEER_SHUFFLE=True,  FARTHEST_ANCHOR=True,  FAR_RANDOM_BIAS=False),
+        "stageb":        dict(BOUNDED_VIEW=True,  PEER_SHUFFLE=True,  FARTHEST_ANCHOR=False, FAR_RANDOM_BIAS=False),
+        "with_far_bias": dict(BOUNDED_VIEW=True,  PEER_SHUFFLE=True,  FARTHEST_ANCHOR=True,  FAR_RANDOM_BIAS=True),
+        "no_shuffle":    dict(BOUNDED_VIEW=True,  PEER_SHUFFLE=False, FARTHEST_ANCHOR=True,  FAR_RANDOM_BIAS=False),
+        "no_bounded":    dict(BOUNDED_VIEW=False, PEER_SHUFFLE=True,  FARTHEST_ANCHOR=False, FAR_RANDOM_BIAS=False),
+        "bidir":         dict(BOUNDED_VIEW=True,  PEER_SHUFFLE=True,  FARTHEST_ANCHOR=True,  FAR_RANDOM_BIAS=False, BIDIRECTIONAL_NEIGHBORS=True),
+    }
+    ablation_n = P.get("REBUILD_ABLATION_N", [])
+    ablation_arms = P.get("REBUILD_ABLATION_ARMS", [])
+    if ablation_n and ablation_arms:
+        for n in ablation_n:
+            for arm in ablation_arms:
+                design = dict(arm_flags[arm], EXPLORE_FRACTION=af, MAX_NEIGHBORS_COEFF=ac)
+                plan.append(_cell("rebuild_ablation", n, design, arm=arm))
+
+    for n in P.get("REBUILD_OLDRPS_N", []):
+        design = dict(BOUNDED_VIEW=False, PEER_SHUFFLE=False, FARTHEST_ANCHOR=False, FAR_RANDOM_BIAS=False,
+                      RANDOM_GOSSIP=True, BIDIRECTIONAL_NEIGHBORS=True,
+                      INCREMENTAL_START=False, LOOP_JITTER=False, FAILURE_STRIKES=1,
+                      MEASURE_TOPOLOGY=True)
+        plan.append(_cell("rebuild_oldrps", n, design, use_common=False, arm="old_rps"))
+
+    return plan
+
+
 def _block_active(name):
     sel = P.get("RUN_BLOCKS")
     return name in sel if sel else True
@@ -467,6 +620,9 @@ def build_plan():
                              TOXIPROXY_ENABLED=True, LATENCY_SCENARIO="mid")
                 plan.append((m, c, True))
         return plan
+
+    if P.get("REBUILD_ONLY", False):
+        return build_rebuild_plan()
 
     if P.get("ADAPTIVE_ONLY", False):
         return build_adaptive_plan()
@@ -569,7 +725,7 @@ def main():
     signal.signal(signal.SIGINT,  lambda s, f: (stop_network(), stop_toxiproxy(), sys.exit(1)))
     signal.signal(signal.SIGTERM, lambda s, f: (stop_network(), stop_toxiproxy(), sys.exit(1)))
 
-    if not P.get("ADAPTIVE_ONLY", False):
+    if not P.get("ADAPTIVE_ONLY", False) and not P.get("REBUILD_ONLY", False):
         start_toxiproxy()
 
     plan = build_plan()
