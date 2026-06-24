@@ -5,7 +5,7 @@ import threading
 import random
 
 from config import (
-    NUM_NODES,
+    NUM_NODES, NUM_SEED_NODES,
     TOXIPROXY_ENABLED, REAL_PORT_START, PROXY_PORT_START,
     FAULT_INJECTION_ENABLED, FAULT_KILL_INTERVAL, FAULT_KILL_PROBABILITY,
     FAULT_MAX_DOWN, FAULT_RESTART_DELAY, FAULT_SEED,
@@ -18,19 +18,27 @@ processes = []
 _chaos_stop = threading.Event()
 _chaos_thread = None
 
+_seed_rng = random.Random(SEED)
+
 
 def _make_cmd(i: int) -> list:
     real_port = REAL_PORT_START + i
     proxy_port = PROXY_PORT_START + i if TOXIPROXY_ENABLED else real_port
+    port_base = PROXY_PORT_START if TOXIPROXY_ENABLED else REAL_PORT_START
     if i == 0:
         bootstrap_str = "None"
+    elif i < NUM_SEED_NODES:
+        seed = _seed_rng.randint(0, i - 1)
+        bootstrap_str = str(port_base + seed)
     else:
-        bootstrap_str = str(PROXY_PORT_START if TOXIPROXY_ENABLED else REAL_PORT_START)
+        seed = _seed_rng.randint(0, NUM_SEED_NODES - 1)
+        bootstrap_str = str(port_base + seed)
     return [sys.executable, "node.py", str(real_port), bootstrap_str, str(i), str(proxy_port), str(SEED + i), "P2PVEC_MARKER"]
 
 
 def start_network():
     print(f"Starte {NUM_NODES} P2P-Knoten...")
+    _seed_rng.seed(SEED)
     for i in range(NUM_NODES):
         cmd = _make_cmd(i)
         processes.append([subprocess.Popen(cmd), cmd])

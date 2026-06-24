@@ -7,7 +7,7 @@ from evaluate import run_evaluation, run_topology
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY   = sys.executable
 
-PROFILE    = "rebuild_bidir"
+PROFILE    = "rebuild_seeds"
 SMOKE_TEST = False
 
 IR_CORPUS_SIZE = 200_000
@@ -105,6 +105,17 @@ PROFILES = {
         REBUILD_RUNS_BY_N={500: 5, 1000: 5, 1500: 3},
         REBUILD_EF_BASE=10, REBUILD_EF_PER_LOG2N=2,
     ),
+    "rebuild_seeds": dict(
+        DATASETS=["ir"], TOTAL_VECTORS=20000, N_BASE=500,
+        NUM_QUERIES=300, NUM_QUERIES_LATENCY=200, NUM_RUNS=5,
+        GOSSIP_WARMUP_S=60, NETWORK_BOOT_WAIT=12, REBUILD_ONLY=True,
+        REBUILD_SWEEP_N=[], REBUILD_ANCHOR_N=[], REBUILD_ABLATION_N=[], REBUILD_OLDRPS_N=[],
+        REBUILD_SEED_N=[500, 1000],
+        REBUILD_SEED_VALUES=[1, 5, 20],
+        REBUILD_NQ_LARGE=150,
+        REBUILD_RUNS_BY_N={500: 5, 1000: 5},
+        REBUILD_EF_BASE=10, REBUILD_EF_PER_LOG2N=2,
+    ),
 }
 P = PROFILES[PROFILE]
 PORT_RELEASE_WAIT = 4
@@ -157,7 +168,7 @@ def meta_str(m):
 
 def base_cfg(n, ttl, nq, total, **extra):
     cfg = {
-        "NUM_NODES": n, "VECTORS_PER_NODE": total // n,
+        "NUM_NODES": n, "NUM_SEED_NODES": 1, "VECTORS_PER_NODE": total // n,
         "NUM_QUERIES": nq, "NUM_RUNS": 1, "TTL_VALUES": list(ttl),
         "GOSSIP_WARMUP_S": P["GOSSIP_WARMUP_S"], "TOXIPROXY_ENABLED": False,
         "LATENCY_SCENARIO": "none", "FAULT_INJECTION_ENABLED": False,
@@ -559,7 +570,7 @@ def build_rebuild_plan():
                 plan.append(_cell("rebuild_grid", n, design, frac=frac, coeff=coeff))
 
     
-    af, ac = P["REBUILD_ABLATION_FRACTION"], P["REBUILD_ABLATION_COEFF"]
+    af, ac = P.get("REBUILD_ABLATION_FRACTION", 0.667), P.get("REBUILD_ABLATION_COEFF", 2.0)
     arm_flags = {
         "stageb_anchor": dict(BOUNDED_VIEW=True,  PEER_SHUFFLE=True,  FARTHEST_ANCHOR=True,  FAR_RANDOM_BIAS=False),
         "stageb":        dict(BOUNDED_VIEW=True,  PEER_SHUFFLE=True,  FARTHEST_ANCHOR=False, FAR_RANDOM_BIAS=False),
@@ -582,6 +593,16 @@ def build_rebuild_plan():
                       INCREMENTAL_START=False, LOOP_JITTER=False, FAILURE_STRIKES=1,
                       MEASURE_TOPOLOGY=True)
         plan.append(_cell("rebuild_oldrps", n, design, use_common=False, arm="old_rps"))
+
+    for n in P.get("REBUILD_SEED_N", []):
+        for s in P.get("REBUILD_SEED_VALUES", []):
+            design = dict(BOUNDED_VIEW=True, PEER_SHUFFLE=True, BIDIRECTIONAL_NEIGHBORS=True,
+                          FARTHEST_ANCHOR=False, FAR_RANDOM_BIAS=False,
+                          EXPLORE_FRACTION=0.667, MAX_NEIGHBORS_COEFF=2.0,
+                          NUM_SEED_NODES=s)
+            cell = _cell("rebuild_seeds", n, design)
+            cell[0]["num_seed_nodes"] = s
+            plan.append(cell)
 
     return plan
 
