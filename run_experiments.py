@@ -22,45 +22,6 @@ PROFILES = {
         FINAL_ACTIVE_BLOCKS=[1, 2, 3, 4, 5, 6],
         FINAL_ACTIVE_N=[100, 200, 500, 1000, 1250],
     ),
-    "frac_pilot": dict(
-        DATASETS=["ir"], TOTAL_VECTORS=20000, N_BASE=500,
-        NUM_QUERIES=300, NUM_QUERIES_LATENCY=200, NUM_RUNS=4,
-        GOSSIP_WARMUP_S=60, NETWORK_BOOT_WAIT=12, OVERLAY_ONLY=True,
-        OVERLAY_NQ_LARGE=150,
-        OVERLAY_RUNS_BY_N={500: 4},
-        OVERLAY_EF_BASE=10, OVERLAY_EF_PER_LOG2N=2,
-        OVERLAY_SWEEP_N=[500],
-        OVERLAY_SWEEP_COEFFS=[2.0],
-        OVERLAY_SWEEP_FRACTIONS=[0.5, 0.667, 0.75],
-    ),
-    "ef_pilot": dict(
-        DATASETS=["ir"], TOTAL_VECTORS=20000, N_BASE=500,
-        NUM_QUERIES=300, NUM_QUERIES_LATENCY=200, NUM_RUNS=4,
-        GOSSIP_WARMUP_S=60, NETWORK_BOOT_WAIT=12, OVERLAY_ONLY=True,
-        OVERLAY_NQ_LARGE=150,
-        OVERLAY_RUNS_BY_N={1000: 4},
-        OVERLAY_EF_BASE=10, OVERLAY_EF_PER_LOG2N=2,
-        OVERLAY_EFCOEFF_N=[1000],
-        OVERLAY_EFCOEFF_CELLS=[
-            ("anker",        3.0, None),
-        ],
-    ),
-    "lat_pilot": dict(
-        DATASETS=["ir"], TOTAL_VECTORS=20000, N_BASE=500,
-        NUM_QUERIES=300, NUM_QUERIES_LATENCY=200, NUM_RUNS=4,
-        GOSSIP_WARMUP_S=60, NETWORK_BOOT_WAIT=12, OVERLAY_ONLY=True,
-        OVERLAY_NQ_LARGE=150,
-        OVERLAY_RUNS_BY_N={1000: 4},
-        OVERLAY_EF_BASE=10, OVERLAY_EF_PER_LOG2N=2,
-        OVERLAY_LATLEVER_N=[1000],
-        OVERLAY_LATLEVER_CELLS=[
-            ("alpha3",      3, 64, 2.0),   
-            ("alpha6",      6, 64, 2.0),
-            ("alpha9",      9, 64, 2.0),
-            ("alpha6_ef96", 6, 96, 2.0),
-            ("coeff3",      3, 64, 3.0),
-        ],
-    ),
 }
 P = PROFILES[PROFILE]
 PORT_RELEASE_WAIT = 4
