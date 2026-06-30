@@ -1,3 +1,4 @@
+import os
 import subprocess
 import time
 import sys
@@ -14,6 +15,13 @@ from config import (
 )
 
 processes = []
+
+NODE_ENV = os.environ.copy()
+NODE_ENV["OMP_NUM_THREADS"] = "1"
+NODE_ENV["OPENBLAS_NUM_THREADS"] = "1"
+NODE_ENV["MKL_NUM_THREADS"] = "1"
+NODE_ENV["VECLIB_MAXIMUM_THREADS"] = "1"
+NODE_ENV["NUMEXPR_NUM_THREADS"] = "1"
 
 _chaos_stop = threading.Event()
 _chaos_thread = None
@@ -41,7 +49,7 @@ def start_network():
     _seed_rng.seed(SEED)
     for i in range(NUM_NODES):
         cmd = _make_cmd(i)
-        processes.append([subprocess.Popen(cmd), cmd])
+        processes.append([subprocess.Popen(cmd, env=NODE_ENV), cmd])
         if INCREMENTAL_START:
             time.sleep(NODE_START_DELAY_S)
 
@@ -106,7 +114,7 @@ def _chaos_worker():
             else:
                 bootstrap_port = None
                 new_cmd = cmd
-            new_proc = subprocess.Popen(new_cmd)
+            new_proc = subprocess.Popen(new_cmd, env=NODE_ENV)
             processes[idx] = [new_proc, cmd]
             print(
                 f"[{time.strftime('%H:%M:%S')}] [Chaos] Neustart Knoten {idx} "

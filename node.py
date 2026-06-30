@@ -4,6 +4,7 @@ import p2p_pb2
 import p2p_pb2_grpc
 import numpy as np
 import faiss
+faiss.omp_set_num_threads(1)
 import random
 import sys
 import signal
