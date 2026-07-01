@@ -3,6 +3,7 @@ from datetime import datetime
 import numpy as np
 from scipy.stats import t as _t_dist
 from evaluate import run_evaluation
+from config import RPC_TIMEOUT_BASE_S
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY   = sys.executable
@@ -20,11 +21,29 @@ PROFILES = {
         OVERLAY_ONLY=True,
         TIER1=20, TIER2=10,
         FINAL_ACTIVE_BLOCKS=[1, 2, 3, 4, 5, 6],
-        FINAL_ACTIVE_N=[100, 200, 500, 1000, 1250],
+        FINAL_ACTIVE_N=[200, 500, 750, 1000, 1250],
     ),
 }
 P = PROFILES[PROFILE]
 PORT_RELEASE_WAIT = 4
+
+RUN = "routing"  
+
+_ALL_BLOCKS = [1, 2, 3, 4, 5, 6]
+_ALL_N      = [200, 500, 750, 1000, 1250]
+
+RUN_AXES = {
+    "routing":    ([1], _ALL_N,          "results_routing.csv"),
+    "ablation":   ([2], [500],           "results_ablation.csv"),
+    "parameter":  ([3], [500],           "results_parameter.csv"),
+    "seeds":      ([4], _ALL_N,          "results_seeds.csv"),
+    "scaling":    ([5], [500, 750, 1000, 1250], "results_scaling.csv"),
+    "robustheit": ([6], [500],           "results_robustheit.csv"),
+    "all":        (_ALL_BLOCKS, _ALL_N,  "results_all.csv"),
+}
+_RUN_BLOCKS, _RUN_N, _RUN_CSV_NAME = RUN_AXES[RUN]
+P["FINAL_ACTIVE_BLOCKS"] = _RUN_BLOCKS
+P["FINAL_ACTIVE_N"]      = _RUN_N
 
 VAR_PLACEMENT = "PLACEMENT"
 VAR_ROUTING   = "ROUTING_STRATEGY"
@@ -33,7 +52,7 @@ VAR_CONNDROP  = "TOXIC_CONN_DROP_PCT"
 VAR_ALPHA     = "ROUTING_ALPHA"
 VAR_EF        = "ROUTING_EF"
 
-OUT_CSV  = os.path.join(HERE, "experiment_results.csv")
+OUT_CSV  = os.path.join(HERE, _RUN_CSV_NAME)
 CONFIG   = os.path.join(HERE, "config.py")
 START = time.time()
 _all_rows, _sim_proc, _tox_proc, _done, _total = [], None, None, 0, 0
@@ -76,6 +95,7 @@ def base_cfg(n, ttl, nq, total, **extra):
         "FAR_RANDOM_BIAS": False, "INCREMENTAL_START": True, "LOOP_JITTER": True,
         "FAILURE_STRIKES": 3, "MEASURE_TOPOLOGY": False,
         "EXPLORE_FRACTION": 0.667, "MAX_NEIGHBORS_COEFF": 2.0,
+        "RPC_TIMEOUT_BASE_S": RPC_TIMEOUT_BASE_S,
     }
     cfg.update(extra)
     return cfg
@@ -300,16 +320,17 @@ def run_condition(meta, cfg, regen):
     log(f"  -> {len(rows)} Zeilen, gesamt {len(_all_rows)}.")
     return True
 
+ROUTING_EF_FIXED = 64
+
 def build_final_overlay_plan():
     plan = []
     t1, t2 = P["TIER1"], P["TIER2"]
-    TTL = 64
 
     def _nq(n):
         return P["NUM_QUERIES"] if n <= 200 else P["NUM_QUERIES_LARGE"]
 
     anchor = dict(
-        ROUTING_STRATEGY="iterative", ROUTING_ALPHA=3, ROUTING_EF=TTL,
+        ROUTING_STRATEGY="iterative", ROUTING_ALPHA=3, ROUTING_EF=ROUTING_EF_FIXED,
         BOUNDED_VIEW=True, PEER_SHUFFLE=True, BIDIRECTIONAL_NEIGHBORS=True,
         FARTHEST_ANCHOR=False, FAR_RANDOM_BIAS=False,
         INCREMENTAL_START=True, LOOP_JITTER=True, FAILURE_STRIKES=3,
@@ -322,15 +343,25 @@ def build_final_overlay_plan():
                     INCREMENTAL_START=False, LOOP_JITTER=False, FAILURE_STRIKES=1,
                     NUM_SEED_NODES=1)
 
+    def _derive_ttl(n, routing, ef, alpha):
+        nav = math.ceil(math.log2(n)) + 2
+        if routing == "iterative":
+            return max(nav, math.ceil(ef / alpha)), f"iter{max(nav, math.ceil(ef / alpha))}"
+        return nav, f"nav{nav}"
+
     def _cell(block, n, ds, overrides, runs, fmd=0, scen="none", needs_tox=False, **meta_kw):
         tot = _total_for(ds)
         routing = overrides.get("ROUTING_STRATEGY", "iterative")
+        ef = overrides.get("ROUTING_EF", anchor["ROUTING_EF"])
+        alpha = overrides.get("ROUTING_ALPHA", anchor["ROUTING_ALPHA"])
+        ttl, ttl_mode = _derive_ttl(n, routing, ef, alpha)
         m = _meta(block, "clustered", routing, n, tot // n, fmd, True, scen, ds)
         m["num_runs"] = runs
-        m["ttl_mode"] = f"fixed{TTL}"
-        m["routing_ef"] = overrides.get("ROUTING_EF", TTL)
+        m["ttl_mode"] = ttl_mode
+        m["routing_ef"] = ef
+        m["rpc_timeout_s"] = overrides.get("RPC_TIMEOUT_BASE_S", RPC_TIMEOUT_BASE_S)
         m.update(meta_kw)
-        c = base_cfg(n, [TTL], _nq(n), tot, DATASET=ds)
+        c = base_cfg(n, [ttl], _nq(n), tot, DATASET=ds)
         c.update(anchor)
         c.update(overrides)
         return (m, c, needs_tox)
@@ -338,7 +369,7 @@ def build_final_overlay_plan():
     _block_num     = {"routing": 1, "ablation": 2, "param": 3,
                       "seeds": 4, "scaling": 5, "robustheit": 6}
     _active_blocks = P.get("FINAL_ACTIVE_BLOCKS", [1, 2, 3, 4, 5, 6])
-    _active_n      = P.get("FINAL_ACTIVE_N",      [100, 200, 500, 1000, 1250])
+    _active_n      = P.get("FINAL_ACTIVE_N",      [200, 500, 750, 1000, 1250])
 
     def _add(cell):
         m = cell[0]
@@ -349,7 +380,7 @@ def build_final_overlay_plan():
         {},
         {"ROUTING_STRATEGY": "greedy",  "ROUTING_FANOUT": 3},
         {"ROUTING_STRATEGY": "flood"},
-        {"ROUTING_STRATEGY": "random"},
+        {"ROUTING_STRATEGY": "random", "RPC_TIMEOUT_BASE_S": 10.0},
     ]
 
     ablation_arms = [
@@ -363,9 +394,7 @@ def build_final_overlay_plan():
 
     for ds in ["ir", "sift"]:
         for ov in router_overrides:
-            _add(_cell("routing", 100, ds, ov, t1))
-
-    _add(_cell("scaling", 200, "ir", {}, t2, arm="final"))
+            _add(_cell("routing", 200, ds, ov, t1))
 
     for ov in router_overrides:
         _add(_cell("routing", 500, "ir", ov, t2))
@@ -376,7 +405,7 @@ def build_final_overlay_plan():
     for coeff in [1.0, 3.0]:
         _add(_cell("param", 500, "ir", {"MAX_NEIGHBORS_COEFF": coeff}, t2,
                           max_neighbors_coeff=coeff))
-    for ef in [30, 128]:
+    for ef in [30, 48, 96, 128]:
         _add(_cell("param", 500, "ir", {"ROUTING_EF": ef}, t2))
     for alpha in [1, 6, 9]:
         _add(_cell("param", 500, "ir", {"ROUTING_ALPHA": alpha}, t2,
@@ -412,10 +441,11 @@ def build_final_overlay_plan():
 
     _add(_cell("scaling", 1000, "ir", _old_rps, t2, arm="old_rps"))
 
-    for seeds in [1, 20]:
+    for seeds in [1, 5, 20]:
         _add(_cell("seeds", 1250, "ir", {"NUM_SEED_NODES": seeds}, t2,
                           num_seed_nodes=seeds))
 
+    _add(_cell("scaling", 750, "ir", {}, t2, arm="final"))
     _add(_cell("scaling", 1250, "ir", {}, t2, arm="final"))
 
     return plan
@@ -448,7 +478,9 @@ def main():
     _total = len(plan)
     if any(needs_tox for _, _, needs_tox in plan):
         start_toxiproxy()
-    log(f"Profil={PROFILE}  {_total} Bedingungen  "
+    ns_in_plan = sorted({meta["num_nodes"] for meta, _, _ in plan})
+    log(f"RUN={RUN}  Bloecke={_RUN_BLOCKS}  N={ns_in_plan}  "
+        f"{_total} Bedingungen  CSV={os.path.basename(OUT_CSV)}  "
         f"Toxiproxy {'ok' if toxiproxy_up() else 'NICHT erreichbar'}.")
 
     skipped = _run_plan(plan)

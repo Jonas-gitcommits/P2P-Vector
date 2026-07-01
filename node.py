@@ -87,7 +87,15 @@ class LocalGraphState:
             s = self.neighbors[t]
             return float("inf") if s is None else float(np.min(np.sum((s - query_np) ** 2, axis=1)))
 
-        return {"action": "hop", "targets": sorted(unvisited, key=_dist)[:fanout]}
+        best = min(unvisited, key=_dist)
+        try:
+            _d, _i = self.local_index.search(query_np.reshape(1, -1), 1)
+            own = float(_d[0][0]) if _i[0][0] >= 0 and np.isfinite(_d[0][0]) else float("inf")
+        except Exception:
+            own = float("inf")
+        if _dist(best) >= own:
+            return {"action": "stop", "targets": []}
+        return {"action": "hop", "targets": [best]}
 
     def add_neighbor_edge(self, ip, port):
         target = f"{ip}:{port}"
