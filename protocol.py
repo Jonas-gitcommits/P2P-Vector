@@ -102,25 +102,27 @@ class DistributedRouter:
 
         targets = decision["targets"]
 
-        visited_with_siblings = list(set(visited_peers) | set(targets))
-
-        tasks = [
-            self.ask_neighbor_for_vectors(
-                target, query_vector, k, ttl - 1, visited_with_siblings,
-                kth_dist=kth_dist, fanout_k=fanout_k, early_stop_threshold=early_stop_threshold
-            )
-            for target in targets
-        ]
-
-        results = await asyncio.gather(*tasks)
+        running_visited = set(visited_peers) | set(targets)
 
         combined_results = []
         total_rpcs = 0
         all_visited = set()
-        for r in results:
+
+        for target in targets:
+            if target in all_visited:
+                continue
+
+            r = await self.ask_neighbor_for_vectors(
+                target, query_vector, k, ttl - 1, list(running_visited),
+                kth_dist=kth_dist, fanout_k=fanout_k, early_stop_threshold=early_stop_threshold
+            )
+
             combined_results.extend(r["peers"])
             total_rpcs += r["rpc_count"]
-            all_visited |= r["visited_nodes"]
+
+            newly_visited = r["visited_nodes"] | {target}
+            all_visited |= newly_visited
+            running_visited |= newly_visited
 
         combined_results.sort(key=lambda x: x[2])
         unique_results = []
