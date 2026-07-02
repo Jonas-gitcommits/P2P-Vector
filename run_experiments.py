@@ -33,7 +33,7 @@ _ALL_BLOCKS = [1, 2, 3, 4, 5, 6]
 _ALL_N      = [50, 200, 500, 750, 1000, 1250]
 
 RUN_AXES = {
-    "routing":    ([1], [50],       "results_routing.csv"),
+    "routing":    ([1], _ALL_N,       "results_routing.csv"),
     "ablation":   ([2], [500],           "results_ablation.csv"),
     "parameter":  ([3], [500],           "results_parameter.csv"),
     "seeds":      ([4], _ALL_N,          "results_seeds.csv"),
@@ -379,9 +379,13 @@ def build_final_overlay_plan():
     ROUTING_EF_BY_N = {50: 16, 200: 64}
     router_strategies = [
         ({}, t1),
-        ({"ROUTING_STRATEGY": "greedy", "ROUTING_FANOUT": 3}, t1),
-        ({"ROUTING_STRATEGY": "flood"}, 3),
-        ({"ROUTING_STRATEGY": "random"}, 3),
+        ({"ROUTING_STRATEGY": "greedy", "ROUTING_FANOUT": 1}, t1),
+        ({"ROUTING_STRATEGY": "flood"}, t1),
+        ({"ROUTING_STRATEGY": "random"}, t1),
+    ]
+    large_n_strategies = [
+        ({}, t1),
+        ({"ROUTING_STRATEGY": "greedy", "ROUTING_FANOUT": 1}, t1),
     ]
 
     ablation_arms = [
@@ -394,10 +398,15 @@ def build_final_overlay_plan():
     ]
 
     for n, ef in ROUTING_EF_BY_N.items():
-        for ds in ["ir"]:
+        for ds in ["ir", "sift"]:
             for ov, runs in router_strategies:
                 overrides = dict(ov, ROUTING_EF=ef)
                 _add(_cell("routing", n, ds, overrides, runs))
+
+    for n in [500, 750, 1000, 1250]:
+        for ov, runs in large_n_strategies:
+            overrides = dict(ov, ROUTING_EF=64)
+            _add(_cell("routing", n, "ir", overrides, runs))
 
     for arm, ov in ablation_arms:
         _add(_cell("ablation", 500, "ir", ov, t1, arm=arm))
