@@ -10,7 +10,7 @@ from config import (
     ROUTING_EF, ROUTING_DEBUG, ROUTING_FANOUT, BIDIRECTIONAL_NEIGHBORS,
     RANDOM_GOSSIP, LOOP_JITTER, FAILURE_STRIKES,
     BOUNDED_VIEW, MAX_NEIGHBORS, EXPLORE_FRACTION, PEER_SHUFFLE,
-    FARTHEST_ANCHOR, FAR_RANDOM_BIAS,
+    FARTHEST_ANCHOR, FAR_RANDOM_BIAS, PROTECT_SEED_EDGES,
 )
 
 class DistributedRouter:
@@ -403,12 +403,19 @@ class DistributedRouter:
                         return float("inf")
                     return float(np.min(np.sum((s - ref) ** 2, axis=1)))
 
-                K_rand = round(EXPLORE_FRACTION * MAX_NEIGHBORS)
-                K_sim = MAX_NEIGHBORS - K_rand
+                protected = set()
+                if PROTECT_SEED_EDGES:
+                    protected = {f"{self.my_ip}:{p}" for p in local_graph.bootstrap_seeds}
+                    protected &= set(local_graph.neighbors)
+                budget = max(0, MAX_NEIGHBORS - len(protected))
 
-                ranked = sorted(local_graph.neighbors.keys(), key=_nb_dist)
-                keep = set(ranked[:K_sim])           
-                rest = ranked[K_sim:]               
+                K_rand = round(EXPLORE_FRACTION * budget)
+                K_sim = budget - K_rand
+
+                ranked = sorted((t for t in local_graph.neighbors if t not in protected),
+                                key=_nb_dist)
+                keep = protected | set(ranked[:K_sim])
+                rest = ranked[K_sim:]              
 
                 pool = list(rest)
                 slots = K_rand

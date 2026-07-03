@@ -309,6 +309,7 @@ def run_evaluation():
         dummy = np.zeros(DIMENSION, dtype=np.float32).tobytes()
         node_set = set(alive_nodes)
         adj = {}
+        topo_unresponsive = 0
         for node in alive_nodes:
             try:
                 resp = stubs[node].QueryNode(
@@ -318,7 +319,10 @@ def run_evaluation():
                 adj[node] = {nb.target for nb in resp.neighbors if nb.target in node_set}
             except grpc.RpcError:
                 adj[node] = set()
+                topo_unresponsive += 1
         topo_metrics = _compute_topology_metrics(adj, alive_nodes)
+        if topo_metrics is not None:
+            topo_metrics["topo_unresponsive"] = topo_unresponsive
         if topo_metrics is not None:
             topo_metrics["cross_cluster_frac"] = _cross_cluster_frac(
                 adj, dataset, port_start, NUM_NODES, DIMENSION, TOPO_COARSE_K)
@@ -329,7 +333,8 @@ def run_evaluation():
                   f"num_scc={topo_metrics['num_scc']} "
                   f"indeg_mean={topo_metrics['indeg_mean']:.2f} "
                   f"indeg_max={topo_metrics['indeg_max']} "
-                  f"cross_cluster_frac={topo_metrics['cross_cluster_frac']}")
+                  f"cross_cluster_frac={topo_metrics['cross_cluster_frac']} "
+                  f"topo_unresponsive={topo_metrics['topo_unresponsive']}")
 
     fanout_k = max(K * 4, 20)
     lat_ms, jitter_ms = LATENCY_PRESETS.get(LATENCY_SCENARIO, (0, 0))
@@ -584,4 +589,4 @@ def run_topology():
 
 
 if __name__ == "__main__":
-    run_evaluation()
+    run_evaluation()    

@@ -39,6 +39,7 @@ RUN_AXES = {
     "seeds":      ([4], _ALL_N,          "results_seeds.csv"),
     "scaling":    ([5], [500, 750, 1000, 1250], "results_scaling.csv"),
     "robustheit": ([6], [500],           "results_robustheit.csv"),
+    "vorstudie":  ([7], [100, 200],      "results_vorstudie.csv"),
     "all":        (_ALL_BLOCKS, _ALL_N,  "results_all.csv"),
 }
 _RUN_BLOCKS, _RUN_N, _RUN_CSV_NAME = RUN_AXES[RUN]
@@ -247,6 +248,8 @@ def _aggregate(run_rows):
         nbm_vals   = [float(r["neighbor_count_mean"]) for r in rows if r.get("neighbor_count_mean") is not None]
         nbmin_vals = [float(r["neighbor_count_min"])  for r in rows if r.get("neighbor_count_min")  is not None]
         nbmax_vals = [float(r["neighbor_count_max"])  for r in rows if r.get("neighbor_count_max")  is not None]
+        _reach_runs = [float(r["reach_mean"]) for r in rows
+                       if r.get("reach_mean") not in (None, "")]
         lat_pool = []
         for r in rows:
             lat_pool.extend(r.get("_lat_samples") or [])
@@ -290,6 +293,9 @@ def _aggregate(run_rows):
             "indeg_mean":                  _topo_mean(rows, "indeg_mean"),
             "indeg_max":                   _topo_mean(rows, "indeg_max"),
             "cross_cluster_frac":          _topo_mean(rows, "cross_cluster_frac"),
+            "topo_unresponsive":           _topo_mean(rows, "topo_unresponsive"),
+            "reach_run_min":               (round(min(_reach_runs), 4) if _reach_runs else None),
+            "reach_run_max":               (round(max(_reach_runs), 4) if _reach_runs else None),
         })
     return result
 
@@ -345,8 +351,10 @@ def build_final_overlay_plan():
 
     def _derive_ttl(n, routing, ef, alpha):
         nav = math.ceil(math.log2(n)) + 2
-        if routing == "iterative":
-            return max(nav, math.ceil(ef / alpha)), f"iter{max(nav, math.ceil(ef / alpha))}"
+        if routing in ("iterative", "greedy"):
+            budget = max(nav, math.ceil(3 * ef / alpha))
+            tag = "iter" if routing == "iterative" else "grd"
+            return budget, f"{tag}{budget}"
         return nav, f"nav{nav}"
 
     def _cell(block, n, ds, overrides, runs, fmd=0, scen="none", needs_tox=False, **meta_kw):
@@ -367,7 +375,8 @@ def build_final_overlay_plan():
         return (m, c, needs_tox)
 
     _block_num     = {"routing": 1, "ablation": 2, "param": 3,
-                      "seeds": 4, "scaling": 5, "robustheit": 6}
+                      "seeds": 4, "scaling": 5, "robustheit": 6,
+                      "vorstudie": 7}
     _active_blocks = P.get("FINAL_ACTIVE_BLOCKS", [1, 2, 3, 4, 5, 6])
     _active_n      = P.get("FINAL_ACTIVE_N",      [200, 500, 750, 1000, 1250])
 
@@ -411,6 +420,8 @@ def build_final_overlay_plan():
     for arm, ov in ablation_arms:
         _add(_cell("ablation", 500, "ir", ov, t1, arm=arm))
 
+    _add(_cell("param", 500, "ir", {}, t2, arm="anchor"))
+
     for coeff in [1.0, 3.0]:
         _add(_cell("param", 500, "ir", {"MAX_NEIGHBORS_COEFF": coeff}, t2,
                           max_neighbors_coeff=coeff))
@@ -423,9 +434,11 @@ def build_final_overlay_plan():
         _add(_cell("param", 500, "ir", {"EXPLORE_FRACTION": frac}, t2,
                           explore_fraction=frac))
 
-    for seeds in [1, 20]:
+    for seeds in [1, 5, 20]:
         _add(_cell("seeds", 500, "ir", {"NUM_SEED_NODES": seeds}, t2,
                           num_seed_nodes=seeds))
+
+    _add(_cell("robustheit", 500, "ir", {}, t1, arm="baseline"))
 
     _fault = dict(FAULT_INJECTION_ENABLED=True, FAULT_KILL_INTERVAL=8.0,
                   FAULT_KILL_PROBABILITY=0.4, FAULT_RESTART_DELAY=6.0)
@@ -450,12 +463,24 @@ def build_final_overlay_plan():
 
     _add(_cell("scaling", 1000, "ir", _old_rps, t2, arm="old_rps"))
 
+    _add(_cell("scaling", 1000, "ir", {"GOSSIP_WARMUP_S": 120}, t2, arm="warmup120"))
+
     for seeds in [1, 5, 20]:
         _add(_cell("seeds", 1250, "ir", {"NUM_SEED_NODES": seeds}, t2,
                           num_seed_nodes=seeds))
 
-    _add(_cell("scaling", 750, "ir", {}, t2, arm="final"))
-    _add(_cell("scaling", 1250, "ir", {}, t2, arm="final"))
+    _pilot_base = dict(BOUNDED_VIEW=False, PEER_SHUFFLE=False,
+                       INCREMENTAL_START=False, LOOP_JITTER=False,
+                       FAILURE_STRIKES=1, NUM_SEED_NODES=1)
+    vorstudie_arms = [
+        ("basis", dict(_pilot_base, BIDIRECTIONAL_NEIGHBORS=False, RANDOM_GOSSIP=False)),
+        ("rez",   dict(_pilot_base, BIDIRECTIONAL_NEIGHBORS=True,  RANDOM_GOSSIP=False)),
+        ("fern",  dict(_pilot_base, BIDIRECTIONAL_NEIGHBORS=False, RANDOM_GOSSIP=True)),
+        ("beide", dict(_pilot_base, BIDIRECTIONAL_NEIGHBORS=True,  RANDOM_GOSSIP=True)),
+    ]
+    for n in [100, 200]:
+        for arm, ov in vorstudie_arms:
+            _add(_cell("vorstudie", n, "ir", ov, t2, arm=arm))
 
     return plan
 
