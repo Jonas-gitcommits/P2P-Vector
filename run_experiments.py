@@ -27,7 +27,7 @@ PROFILES = {
 P = PROFILES[PROFILE]
 PORT_RELEASE_WAIT = 4
 
-RUN = "parameter"  
+RUN = "robustheit"  
 
 _ALL_BLOCKS = [1, 2, 3, 4, 5, 6]
 _ALL_N      = [50, 200, 500, 750, 1000, 1250]
@@ -35,6 +35,7 @@ _ALL_N      = [50, 200, 500, 750, 1000, 1250]
 RUN_AXES = {
     "routing":    ([1], _ALL_N,       "results_routing.csv"),
     "ablation":   ([2], [500],           "results_ablation.csv"),
+    "ablation1000": ([2], [1000],        "results_ablation_1000.csv"),
     "parameter":  ([3], [500],           "results_parameter.csv"),
     "seeds":      ([4], _ALL_N,          "results_seeds.csv"),
     "scaling":    ([5], [500, 750, 1000, 1250], "results_scaling.csv"),
@@ -421,6 +422,9 @@ def build_final_overlay_plan():
 
     for arm, ov in ablation_arms:
         _add(_cell("ablation", 500, "ir", ov, t1, arm=arm))
+
+    _add(_cell("ablation", 1000, "ir", {"PEER_SHUFFLE": False}, t1, arm="no_shuffle"))
+    _add(_cell("ablation", 1000, "ir", {"PROTECT_SEED_EDGES": False}, t1, arm="no_seedlock"))
 
     _add(_cell("param", 500, "ir", {}, t2, arm="anchor"))
 
