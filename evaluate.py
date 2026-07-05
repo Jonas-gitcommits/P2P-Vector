@@ -485,6 +485,7 @@ def run_evaluation():
             "indeg_mean":                  topo_metrics["indeg_mean"]         if topo_metrics else None,
             "indeg_max":                   topo_metrics["indeg_max"]          if topo_metrics else None,
             "cross_cluster_frac":          topo_metrics["cross_cluster_frac"] if topo_metrics else None,
+            "topo_unresponsive":           topo_metrics["topo_unresponsive"]  if topo_metrics else None,
             "_lat_samples":                list(rd["all_lats"]),
         })
     return rows

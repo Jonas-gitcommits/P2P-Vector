@@ -27,7 +27,7 @@ PROFILES = {
 P = PROFILES[PROFILE]
 PORT_RELEASE_WAIT = 4
 
-RUN = "routing"  
+RUN = "parameter"  
 
 _ALL_BLOCKS = [1, 2, 3, 4, 5, 6]
 _ALL_N      = [50, 200, 500, 750, 1000, 1250]
@@ -342,7 +342,7 @@ def build_final_overlay_plan():
         INCREMENTAL_START=True, LOOP_JITTER=True, FAILURE_STRIKES=3,
         NUM_SEED_NODES=5, RANDOM_GOSSIP=False,
         EXPLORE_FRACTION=0.667, MAX_NEIGHBORS_COEFF=2.0,
-        MEASURE_TOPOLOGY=True,
+        MEASURE_TOPOLOGY=True, PROTECT_SEED_EDGES=True,
     )
 
     _old_rps = dict(BOUNDED_VIEW=False, PEER_SHUFFLE=False, RANDOM_GOSSIP=True,
@@ -389,8 +389,8 @@ def build_final_overlay_plan():
     router_strategies = [
         ({}, t1),
         ({"ROUTING_STRATEGY": "greedy", "ROUTING_FANOUT": 1}, t1),
-        ({"ROUTING_STRATEGY": "flood"}, t1),
-        ({"ROUTING_STRATEGY": "random"}, t1),
+        ({"ROUTING_STRATEGY": "flood"}, t2),
+        ({"ROUTING_STRATEGY": "random"}, t2),
     ]
     large_n_strategies = [
         ({}, t1),
@@ -416,6 +416,8 @@ def build_final_overlay_plan():
         for ov, runs in large_n_strategies:
             overrides = dict(ov, ROUTING_EF=64)
             _add(_cell("routing", n, "ir", overrides, runs))
+
+    _add(_cell("ablation", 500, "ir", {"PROTECT_SEED_EDGES": False}, t1, arm="no_seedlock"))
 
     for arm, ov in ablation_arms:
         _add(_cell("ablation", 500, "ir", ov, t1, arm=arm))
