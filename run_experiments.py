@@ -27,13 +27,13 @@ PROFILES = {
 P = PROFILES[PROFILE]
 PORT_RELEASE_WAIT = 4
 
-RUN = "robustheit"  
+RUN = "routing"  
 
-_ALL_BLOCKS = [1, 2, 3, 4, 5, 6]
+_ALL_BLOCKS = [1, 2, 3, 4, 5, 6, 7, 8]
 _ALL_N      = [50, 200, 500, 750, 1000, 1250]
 
 RUN_AXES = {
-    "routing":    ([1], _ALL_N,       "results_routing.csv"),
+    "routing":    ([1], [50, 200],       "results_routing.csv"),
     "ablation":   ([2], [500],           "results_ablation.csv"),
     "ablation1000": ([2], [1000],        "results_ablation_1000.csv"),
     "parameter":  ([3], [500],           "results_parameter.csv"),
@@ -41,6 +41,7 @@ RUN_AXES = {
     "scaling":    ([5], [500, 750, 1000, 1250], "results_scaling.csv"),
     "robustheit": ([6], [500],           "results_robustheit.csv"),
     "vorstudie":  ([7], [100, 200],      "results_vorstudie.csv"),
+    "warmup":     ([8], [1000],          "results_warmup.csv"),
     "all":        (_ALL_BLOCKS, _ALL_N,  "results_all.csv"),
 }
 _RUN_BLOCKS, _RUN_N, _RUN_CSV_NAME = RUN_AXES[RUN]
@@ -377,7 +378,7 @@ def build_final_overlay_plan():
 
     _block_num     = {"routing": 1, "ablation": 2, "param": 3,
                       "seeds": 4, "scaling": 5, "robustheit": 6,
-                      "vorstudie": 7}
+                      "vorstudie": 7, "warmup": 8}
     _active_blocks = P.get("FINAL_ACTIVE_BLOCKS", [1, 2, 3, 4, 5, 6])
     _active_n      = P.get("FINAL_ACTIVE_N",      [200, 500, 750, 1000, 1250])
 
@@ -390,8 +391,8 @@ def build_final_overlay_plan():
     router_strategies = [
         ({}, t1),
         ({"ROUTING_STRATEGY": "greedy", "ROUTING_FANOUT": 1}, t1),
-        ({"ROUTING_STRATEGY": "flood"}, t2),
-        ({"ROUTING_STRATEGY": "random"}, t2),
+        ({"ROUTING_STRATEGY": "flood"}, t1),
+        ({"ROUTING_STRATEGY": "random"}, t1),
     ]
     large_n_strategies = [
         ({}, t1),
@@ -487,6 +488,16 @@ def build_final_overlay_plan():
     for n in [100, 200]:
         for arm, ov in vorstudie_arms:
             _add(_cell("vorstudie", n, "ir", ov, t2, arm=arm))
+
+    def _add_warmup_cells():
+        for ws in [30, 60, 120, 240]:
+            _add(_cell("warmup", 1000, "ir", {"GOSSIP_WARMUP_S": ws}, t2,
+                              arm=f"anchor_w{ws}"))
+            _add(_cell("warmup", 1000, "ir",
+                              {"GOSSIP_WARMUP_S": ws, "PEER_SHUFFLE": False}, t2,
+                              arm=f"noshuffle_w{ws}"))
+
+    _add_warmup_cells()
 
     return plan
 
