@@ -19,7 +19,7 @@ PROFILES = {
         NUM_QUERIES=300, NUM_QUERIES_LARGE=150, NUM_RUNS=20,
         GOSSIP_WARMUP_S=60, NETWORK_BOOT_WAIT=12,
         OVERLAY_ONLY=True,
-        TIER1=20, TIER2=10,
+        TIER1=20, TIER2=20,
         FINAL_ACTIVE_BLOCKS=[1, 2, 3, 4, 5, 6],
         FINAL_ACTIVE_N=[200, 500, 750, 1000, 1250],
     ),
@@ -27,13 +27,14 @@ PROFILES = {
 P = PROFILES[PROFILE]
 PORT_RELEASE_WAIT = 4
 
-RUN = "routing"  
+RUN = "all"  
 
-_ALL_BLOCKS = [1, 2, 3, 4, 5, 6, 7, 8]
+_ALL_BLOCKS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 _ALL_N      = [50, 200, 500, 750, 1000, 1250]
+_ALL_N_FULL = [50, 100, 200, 500, 750, 1000, 1250]
 
 RUN_AXES = {
-    "routing":    ([1], [50, 200],       "results_routing.csv"),
+    "routing":    ([1], _ALL_N,       "results_routing.csv"),
     "ablation":   ([2], [500],           "results_ablation.csv"),
     "ablation1000": ([2], [1000],        "results_ablation_1000.csv"),
     "parameter":  ([3], [500],           "results_parameter.csv"),
@@ -42,7 +43,9 @@ RUN_AXES = {
     "robustheit": ([6], [500],           "results_robustheit.csv"),
     "vorstudie":  ([7], [100, 200],      "results_vorstudie.csv"),
     "warmup":     ([8], [1000],          "results_warmup.csv"),
-    "all":        (_ALL_BLOCKS, _ALL_N,  "results_all.csv"),
+    "ksweep":     ([9],  [1000],         "results_ksweep.csv"),
+    "dichte":     ([10], [1000],         "results_dichte.csv"),
+    "all":        (_ALL_BLOCKS, _ALL_N_FULL, "results_all.csv"),
 }
 _RUN_BLOCKS, _RUN_N, _RUN_CSV_NAME = RUN_AXES[RUN]
 P["FINAL_ACTIVE_BLOCKS"] = _RUN_BLOCKS
@@ -359,8 +362,8 @@ def build_final_overlay_plan():
             return budget, f"{tag}{budget}"
         return nav, f"nav{nav}"
 
-    def _cell(block, n, ds, overrides, runs, fmd=0, scen="none", needs_tox=False, **meta_kw):
-        tot = _total_for(ds)
+    def _cell(block, n, ds, overrides, runs, fmd=0, scen="none", needs_tox=False, tot=None, **meta_kw):
+        tot = _total_for(ds) if tot is None else tot
         routing = overrides.get("ROUTING_STRATEGY", "iterative")
         ef = overrides.get("ROUTING_EF", anchor["ROUTING_EF"])
         alpha = overrides.get("ROUTING_ALPHA", anchor["ROUTING_ALPHA"])
@@ -378,7 +381,8 @@ def build_final_overlay_plan():
 
     _block_num     = {"routing": 1, "ablation": 2, "param": 3,
                       "seeds": 4, "scaling": 5, "robustheit": 6,
-                      "vorstudie": 7, "warmup": 8}
+                      "vorstudie": 7, "warmup": 8,
+                      "ksweep": 9, "dichte": 10}
     _active_blocks = P.get("FINAL_ACTIVE_BLOCKS", [1, 2, 3, 4, 5, 6])
     _active_n      = P.get("FINAL_ACTIVE_N",      [200, 500, 750, 1000, 1250])
 
@@ -418,6 +422,13 @@ def build_final_overlay_plan():
         for ov, runs in large_n_strategies:
             overrides = dict(ov, ROUTING_EF=64)
             _add(_cell("routing", n, "ir", overrides, runs))
+
+    for k in [1, 10, 3]:
+        _add(_cell("ksweep", 1000, "ir", {"K": k, "ROUTING_EF": 64}, t1, arm=f"k{k}"))
+
+    for total in [40000, 20000]:
+        _add(_cell("dichte", 1000, "ir", {"ROUTING_EF": 64}, t1,
+                   tot=total, arm=f"v{total // 1000}"))
 
     _add(_cell("ablation", 500, "ir", {"PROTECT_SEED_EDGES": False}, t1, arm="no_seedlock"))
 
@@ -506,15 +517,18 @@ def build_plan():
     return build_final_overlay_plan()
 
 def _run_plan(plan):
-    last_n, last_ds, skipped = None, None, []
+    last_n, last_ds, last_vpn, skipped = None, None, None, []
     for meta, cfg, needs_tox in plan:
         if needs_tox and not toxiproxy_up():
             log(f"[{meta['block']}] uebersprungen (Toxiproxy nicht da).")
             skipped.append((meta, cfg, needs_tox))
             continue
-        regen = meta["num_nodes"] != last_n or meta["dataset"] != last_ds
+        regen = (meta["num_nodes"] != last_n
+                 or meta["dataset"] != last_ds
+                 or meta["vectors_per_node"] != last_vpn)
         if run_condition(meta, cfg, regen):
             last_n, last_ds = meta["num_nodes"], meta["dataset"]
+            last_vpn = meta["vectors_per_node"]
     return skipped
 
 def main():
