@@ -1,3 +1,4 @@
+import os
 import subprocess
 import time
 import sys
@@ -5,34 +6,52 @@ import threading
 import random
 
 from config import (
-    NUM_NODES,
+    NUM_NODES, NUM_SEED_NODES,
     TOXIPROXY_ENABLED, REAL_PORT_START, PROXY_PORT_START,
     FAULT_INJECTION_ENABLED, FAULT_KILL_INTERVAL, FAULT_KILL_PROBABILITY,
     FAULT_MAX_DOWN, FAULT_RESTART_DELAY, FAULT_SEED,
     LATENCY_SCENARIO, SEED,
+    INCREMENTAL_START, NODE_START_DELAY_S,
 )
 
 processes = []
 
+NODE_ENV = os.environ.copy()
+NODE_ENV["OMP_NUM_THREADS"] = "1"
+NODE_ENV["OPENBLAS_NUM_THREADS"] = "1"
+NODE_ENV["MKL_NUM_THREADS"] = "1"
+NODE_ENV["VECLIB_MAXIMUM_THREADS"] = "1"
+NODE_ENV["NUMEXPR_NUM_THREADS"] = "1"
+
 _chaos_stop = threading.Event()
 _chaos_thread = None
+
+_seed_rng = random.Random(SEED)
 
 
 def _make_cmd(i: int) -> list:
     real_port = REAL_PORT_START + i
     proxy_port = PROXY_PORT_START + i if TOXIPROXY_ENABLED else real_port
+    port_base = PROXY_PORT_START if TOXIPROXY_ENABLED else REAL_PORT_START
     if i == 0:
         bootstrap_str = "None"
+    elif i < NUM_SEED_NODES:
+        seed = _seed_rng.randint(0, i - 1)
+        bootstrap_str = str(port_base + seed)
     else:
-        bootstrap_str = str(PROXY_PORT_START if TOXIPROXY_ENABLED else REAL_PORT_START)
-    return [sys.executable, "node.py", str(real_port), bootstrap_str, str(i), str(proxy_port), str(SEED + i)]
+        seed = _seed_rng.randint(0, NUM_SEED_NODES - 1)
+        bootstrap_str = str(port_base + seed)
+    return [sys.executable, "node.py", str(real_port), bootstrap_str, str(i), str(proxy_port), str(SEED + i), "P2PVEC_MARKER"]
 
 
 def start_network():
     print(f"Starte {NUM_NODES} P2P-Knoten...")
+    _seed_rng.seed(SEED)
     for i in range(NUM_NODES):
         cmd = _make_cmd(i)
-        processes.append([subprocess.Popen(cmd), cmd])
+        processes.append([subprocess.Popen(cmd, env=NODE_ENV), cmd])
+        if INCREMENTAL_START:
+            time.sleep(NODE_START_DELAY_S)
 
     print("Netzwerk hochgefahren! Warte auf Initialisierung...")
     time.sleep(3)
@@ -70,13 +89,15 @@ def _stop_chaos_loop():
         _chaos_thread.join(timeout=5)
 
 
+# Angelehnt an [stutzbach2006churn].
 def _chaos_worker():
     rng = random.Random(FAULT_SEED)
-    
+
     down = {}
+    last_kill_check = time.time()
 
     while not _chaos_stop.is_set():
-        _chaos_stop.wait(FAULT_KILL_INTERVAL)
+        _chaos_stop.wait(1.0)
         if _chaos_stop.is_set():
             break
 
@@ -84,12 +105,25 @@ def _chaos_worker():
 
         for idx in [k for k, (t, _) in down.items() if now - t >= FAULT_RESTART_DELAY]:
             _, cmd = down.pop(idx)
-            new_proc = subprocess.Popen(cmd)
+            alive_ids = [i for i in range(NUM_NODES) if i not in down and i != idx]
+            if alive_ids:
+                b = rng.choice(alive_ids)
+                bootstrap_port = (PROXY_PORT_START + b) if TOXIPROXY_ENABLED else (REAL_PORT_START + b)
+                new_cmd = list(cmd)
+                new_cmd[3] = str(bootstrap_port)
+            else:
+                bootstrap_port = None
+                new_cmd = cmd
+            new_proc = subprocess.Popen(new_cmd, env=NODE_ENV)
             processes[idx] = [new_proc, cmd]
             print(
                 f"[{time.strftime('%H:%M:%S')}] [Chaos] Neustart Knoten {idx} "
-                f"(Real-Port {REAL_PORT_START + idx})"
+                f"(Real-Port {REAL_PORT_START + idx}, Bootstrap-Port {bootstrap_port})"
             )
+
+        if now - last_kill_check < FAULT_KILL_INTERVAL:
+            continue
+        last_kill_check = now
 
         if len(down) < FAULT_MAX_DOWN and rng.random() < FAULT_KILL_PROBABILITY:
             candidates = [i for i in range(NUM_NODES) if i not in down]

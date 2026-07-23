@@ -8,6 +8,7 @@ import random
 import faiss
 import os
 import pickle
+import hashlib
 from scipy.stats import t
 
 
@@ -15,16 +16,16 @@ def _t_crit(n):
     return float(t.ppf(0.975, n - 1))
 
 
+# Angelehnt an [aumueller2020annbenchmarks].
 def build_ground_truth_ids(dataset, queries, subset_size, k, dimension, dataset_name):
-    import hashlib
-    h = hashlib.md5(dataset[:subset_size].tobytes()).hexdigest()[:8]
+    h = hashlib.md5(dataset[:subset_size].tobytes() + queries.tobytes()).hexdigest()[:8]
     cache_file = f"gt_cache_{dataset_name}_size{subset_size}_k{k}_{h}.pkl"
     if os.path.exists(cache_file):
         print(f"  [Cache] Lade Ground-Truth aus {cache_file}...")
         with open(cache_file, "rb") as f:
             return pickle.load(f)
 
-    print(f"  [Cache Miss] Berechne Ground-Truth via FAISS (wird in {cache_file} gespeichert)...")
+    print(f"  [Cache Miss] Berechne Ground-Truth mit FAISS (wird in {cache_file} gespeichert)...")
     central_index = faiss.IndexFlatL2(dimension)
     central_index.add(dataset[:subset_size])
     dists, indices = central_index.search(queries, k)
@@ -72,6 +73,166 @@ def make_request(query_vector, k, ttl, fanout_k, early_stop_threshold=0.0):
     )
 
 
+# Angelehnt an [tarjan1972scc].
+def _strongly_connected_components(nodes, adj):
+    visited = set()
+    order = []
+    for start in nodes:
+        if start in visited:
+            continue
+        stack = [(start, iter(adj.get(start, ())))]
+        visited.add(start)
+        while stack:
+            node, it = stack[-1]
+            pushed = False
+            for nb in it:
+                if nb not in visited:
+                    visited.add(nb)
+                    stack.append((nb, iter(adj.get(nb, ()))))
+                    pushed = True
+                    break
+            if not pushed:
+                order.append(node)
+                stack.pop()
+    radj = {v: set() for v in nodes}
+    for u in nodes:
+        for v in adj.get(u, ()):
+            if v in radj:
+                radj[v].add(u)
+    seen = set()
+    comps = []
+    for start in reversed(order):
+        if start in seen:
+            continue
+        comp = []
+        stack = [start]
+        seen.add(start)
+        while stack:
+            node = stack.pop()
+            comp.append(node)
+            for nb in radj.get(node, ()):
+                if nb not in seen:
+                    seen.add(nb)
+                    stack.append(nb)
+        comps.append(comp)
+    return comps
+
+
+def _reachable_count(start, adj, node_set):
+    seen = {start}
+    stack = [start]
+    while stack:
+        u = stack.pop()
+        for v in adj.get(u, ()):
+            if v in node_set and v not in seen:
+                seen.add(v)
+                stack.append(v)
+    return len(seen)
+
+
+# Angelehnt an [jelasity2007peersampling].
+def _compute_topology_metrics(adj, nodes):
+    n_alive = len(nodes)
+    if n_alive == 0:
+        return None
+    node_set = set(nodes)
+
+    indeg = {v: 0 for v in nodes}
+    for u in nodes:
+        for v in adj.get(u, ()):
+            if v in indeg:
+                indeg[v] += 1
+    indeg_vals = list(indeg.values())
+
+    try:
+        import networkx as nx
+        G = nx.DiGraph()
+        G.add_nodes_from(nodes)
+        for u in nodes:
+            for v in adj.get(u, ()):
+                if v in node_set:
+                    G.add_edge(u, v)
+        reach_fracs = [(len(nx.descendants(G, n)) + 1) / n_alive for n in nodes]
+        scc_sizes = [len(c) for c in nx.strongly_connected_components(G)]
+       
+        comp_size = {}
+        for comp in nx.connected_components(G.to_undirected()):
+            for n in comp:
+                comp_size[n] = len(comp)
+        reach_sym_fracs = [comp_size[n] / n_alive for n in nodes]
+    except ImportError:
+        reach_fracs = [_reachable_count(n, adj, node_set) / n_alive for n in nodes]
+        scc_sizes = [len(c) for c in _strongly_connected_components(nodes, adj)]
+        sadj = {v: set() for v in nodes}
+        for u in nodes:
+            for v in adj.get(u, ()):
+                if v in sadj:
+                    sadj[u].add(v)
+                    sadj[v].add(u)
+        comp_size = {}
+        seen = set()
+        for s in nodes:
+            if s in seen:
+                continue
+            comp = [s]
+            seen.add(s)
+            stack = [s]
+            while stack:
+                x = stack.pop()
+                for y in sadj[x]:
+                    if y not in seen:
+                        seen.add(y)
+                        comp.append(y)
+                        stack.append(y)
+            for x in comp:
+                comp_size[x] = len(comp)
+        reach_sym_fracs = [comp_size[n] / n_alive for n in nodes]
+
+    largest_scc = max(scc_sizes, default=0)
+    return {
+        "reach_mean":       round(float(np.mean(reach_fracs)), 4),
+        "reach_min":        round(float(min(reach_fracs)), 4),
+        "reach_sym":        round(float(np.mean(reach_sym_fracs)), 4),
+        "largest_scc_frac": round(largest_scc / n_alive, 4),
+        "num_scc":          len(scc_sizes),
+        "indeg_mean":       round(float(np.mean(indeg_vals)), 4),
+        "indeg_max":        int(max(indeg_vals)) if indeg_vals else 0,
+    }
+
+
+def _cross_cluster_frac(adj, dataset, port_start, num_nodes, dimension, coarse_k):
+    try:
+        partition = np.load("partition.npy")
+    except FileNotFoundError:
+        return None
+    ds = dataset[:len(partition)]
+    node_ref = np.zeros((num_nodes, dimension), dtype=np.float32)
+    for k in range(num_nodes):
+        mask = partition == k
+        if mask.any():
+            node_ref[k] = ds[mask].mean(axis=0)
+
+    k = min(coarse_k, num_nodes)
+    if k < 1:
+        return None
+    kmeans = faiss.Kmeans(dimension, k, niter=20, verbose=False, seed=42)
+    kmeans.train(np.ascontiguousarray(node_ref))
+    _, labels = kmeans.index.search(np.ascontiguousarray(node_ref), 1)
+    region = labels.ravel()
+
+    def _region_of(addr):
+        return region[int(addr.split(":")[1]) - port_start]
+
+    total = cross = 0
+    for i_addr, outs in adj.items():
+        ri = _region_of(i_addr)
+        for j_addr in outs:
+            total += 1
+            if _region_of(j_addr) != ri:
+                cross += 1
+    return round(cross / total, 4) if total else 0.0
+
+
 def run_evaluation():
     import config as _cfg
     importlib.reload(_cfg)
@@ -79,12 +240,14 @@ def run_evaluation():
         NUM_NODES, SUBSET_SIZE, EARLY_STOP_ENABLED, EARLY_STOP_THRESHOLD,
         TOXIPROXY_ENABLED, PROXY_PORT_START, REAL_PORT_START,
         NUM_QUERIES, NUM_RUNS, K, TTL_VALUES, DIMENSION, GOSSIP_WARMUP_S,
-        DATASET, LATENCY_SCENARIO, SEED, ROUTING_STRATEGY,
+        DATASET, LATENCY_SCENARIO, LATENCY_PRESETS, SEED, ROUTING_STRATEGY,
+        FAULT_INJECTION_ENABLED, FAULT_MAX_DOWN, MEASURE_TOPOLOGY, TOPO_COARSE_K,
     )
 
     early_stop_threshold = EARLY_STOP_THRESHOLD if EARLY_STOP_ENABLED else 0.0
     port_start = PROXY_PORT_START if TOXIPROXY_ENABLED else REAL_PORT_START
     all_nodes = [f"127.0.0.1:{port_start + i}" for i in range(NUM_NODES)]
+    probe_nodes = [f"127.0.0.1:{REAL_PORT_START + i}" for i in range(NUM_NODES)]
 
     print("Lade Datensatz...")
     dataset     = np.load("dataset.npy").astype(np.float32)
@@ -97,11 +260,29 @@ def run_evaluation():
     true_ids_all = build_ground_truth_ids(dataset, all_queries, SUBSET_SIZE, K, DIMENSION, DATASET)
     print(f"  Fertig: {len(true_ids_all)} Referenzmengen.\n")
 
+    required = NUM_NODES - (FAULT_MAX_DOWN if FAULT_INJECTION_ENABLED else 0)
+    ready_deadline = 180.0
+    ready_start = time.time()
+    while True:
+        alive = get_alive_nodes(probe_nodes)
+        ready_wait_s = time.time() - ready_start
+        if len(alive) >= required:
+            print(f"Readiness erreicht: {len(alive)}/{NUM_NODES} "
+                  f"(benötigt {required}) nach {ready_wait_s:.1f}s.")
+            break
+        if ready_wait_s >= ready_deadline:
+            print(f"Readiness-Deadline ({ready_deadline}s) überschritten, "
+                  f"nur {len(alive)}/{NUM_NODES} erreichbar (benötigt {required}). "
+                  f"Fahre trotzdem fort.")
+            break
+        time.sleep(2)
+
     if GOSSIP_WARMUP_S > 0:
         print(f"Warte {GOSSIP_WARMUP_S}s für Gossip-Konvergenz...")
         time.sleep(GOSSIP_WARMUP_S)
 
-    alive_nodes = get_alive_nodes(all_nodes)
+    alive_real = set(get_alive_nodes(probe_nodes))
+    alive_nodes = [all_nodes[i] for i in range(NUM_NODES) if probe_nodes[i] in alive_real]
     print(f"Erreichbar: {len(alive_nodes)}/{len(all_nodes)}")
     if not alive_nodes:
         print("Keine Knoten erreichbar! Abbruch.")
@@ -117,10 +298,46 @@ def run_evaluation():
         except grpc.RpcError:
             pass
     if nb_counts:
-        print(f"Ø Nachbarn pro Knoten: {np.mean(nb_counts):.1f}  "
-              f"(min={min(nb_counts)}, max={max(nb_counts)})")
+        nb_mean = float(np.mean(nb_counts)); nb_min = int(min(nb_counts)); nb_max = int(max(nb_counts))
+        print(f"Durchschnittlich {nb_mean:.1f} Nachbarn pro Knoten "
+              f"(min={nb_min}, max={nb_max})")
+    else:
+        nb_mean = nb_min = nb_max = None
+
+    topo_metrics = None
+    if MEASURE_TOPOLOGY:
+        dummy = np.zeros(DIMENSION, dtype=np.float32).tobytes()
+        node_set = set(alive_nodes)
+        adj = {}
+        topo_unresponsive = 0
+        for node in alive_nodes:
+            try:
+                resp = stubs[node].QueryNode(
+                    p2p_pb2.QueryNodeRequest(query=p2p_pb2.Vector(values=dummy), k=1),
+                    timeout=3.0,
+                )
+                adj[node] = {nb.target for nb in resp.neighbors if nb.target in node_set}
+            except grpc.RpcError:
+                adj[node] = set()
+                topo_unresponsive += 1
+        topo_metrics = _compute_topology_metrics(adj, alive_nodes)
+        if topo_metrics is not None:
+            topo_metrics["topo_unresponsive"] = topo_unresponsive
+        if topo_metrics is not None:
+            topo_metrics["cross_cluster_frac"] = _cross_cluster_frac(
+                adj, dataset, port_start, NUM_NODES, DIMENSION, TOPO_COARSE_K)
+            print(f"Topologie: reach_mean={topo_metrics['reach_mean']:.3f} "
+                  f"reach_min={topo_metrics['reach_min']:.3f} "
+                  f"reach_sym={topo_metrics['reach_sym']:.3f} "
+                  f"largest_scc_frac={topo_metrics['largest_scc_frac']:.3f} "
+                  f"num_scc={topo_metrics['num_scc']} "
+                  f"indeg_mean={topo_metrics['indeg_mean']:.2f} "
+                  f"indeg_max={topo_metrics['indeg_max']} "
+                  f"cross_cluster_frac={topo_metrics['cross_cluster_frac']} "
+                  f"topo_unresponsive={topo_metrics['topo_unresponsive']}")
 
     fanout_k = max(K * 4, 20)
+    lat_ms, jitter_ms = LATENCY_PRESETS.get(LATENCY_SCENARIO, (0, 0))
     run_data = {ttl: {"recalls": [], "latencies": [], "all_lats": [],
                       "rpcs": [], "unique": [], "failures": [], "timeouts": [],
                       "incomplete": [], "recalls_all": []}
@@ -142,7 +359,8 @@ def run_evaluation():
                 request = make_request(query_vector, K, ttl, fanout_k, early_stop_threshold)
                 try:
                     t0 = time.time()
-                    response = stubs[entry_nodes[i]].SearchSimilar(request, timeout=10.0)
+                    response = stubs[entry_nodes[i]].SearchSimilar(
+                        request, timeout=10.0 + ttl * 2 * (lat_ms + jitter_ms) / 1000)
                     q_lats.append((time.time() - t0) * 1000)
                     returned_ids = set(response.vector_ids[:K])
                     if len(returned_ids) < K:
@@ -204,6 +422,7 @@ def run_evaluation():
             avg_recall  = np.mean(run_recalls) * 100
             avg_lat     = np.mean(rd["latencies"])
             all_lats    = rd["all_lats"]
+            # Angelehnt an [dean2013tail].
             avg_p50_lat = float(np.percentile(all_lats, 50))
             avg_p95_lat = float(np.percentile(all_lats, 95))
             avg_p99_lat = float(np.percentile(all_lats, 99))
@@ -253,9 +472,122 @@ def run_evaluation():
             "latency_p99_ms":              round(avg_p99_lat, 4),
             "rpc_count_mean":              round(avg_rpcs, 2),
             "unique_nodes_mean":           round(avg_unique, 2),
+            "alive_count":                 len(alive_nodes),
+            "ready_wait_s":                round(ready_wait_s, 1),
+            "neighbor_count_mean":         round(nb_mean, 2) if nb_mean is not None else None,
+            "neighbor_count_min":          nb_min,
+            "neighbor_count_max":          nb_max,
+            "reach_mean":                  topo_metrics["reach_mean"]         if topo_metrics else None,
+            "reach_min":                   topo_metrics["reach_min"]          if topo_metrics else None,
+            "reach_sym":                   topo_metrics["reach_sym"]          if topo_metrics else None,
+            "largest_scc_frac":            topo_metrics["largest_scc_frac"]   if topo_metrics else None,
+            "num_scc":                     topo_metrics["num_scc"]            if topo_metrics else None,
+            "indeg_mean":                  topo_metrics["indeg_mean"]         if topo_metrics else None,
+            "indeg_max":                   topo_metrics["indeg_max"]          if topo_metrics else None,
+            "cross_cluster_frac":          topo_metrics["cross_cluster_frac"] if topo_metrics else None,
+            "topo_unresponsive":           topo_metrics["topo_unresponsive"]  if topo_metrics else None,
+            "_lat_samples":                list(rd["all_lats"]),
         })
     return rows
 
 
+def run_topology():
+    import config as _cfg
+    importlib.reload(_cfg)
+    from config import (
+        NUM_NODES, REAL_PORT_START, GOSSIP_WARMUP_S, DIMENSION,
+        FAULT_INJECTION_ENABLED, FAULT_MAX_DOWN, K, TTL_VALUES, SEED,
+    )
+    import networkx as nx
+
+    probe_nodes = [f"127.0.0.1:{REAL_PORT_START + i}" for i in range(NUM_NODES)]
+
+    required = NUM_NODES - (FAULT_MAX_DOWN if FAULT_INJECTION_ENABLED else 0)
+    ready_deadline = 180.0
+    ready_start = time.time()
+    while True:
+        alive = get_alive_nodes(probe_nodes)
+        if len(alive) >= required or time.time() - ready_start >= ready_deadline:
+            break
+        time.sleep(2)
+
+    if GOSSIP_WARMUP_S > 0:
+        print(f"Warte {GOSSIP_WARMUP_S}s für Gossip-Konvergenz...")
+        time.sleep(GOSSIP_WARMUP_S)
+
+    alive_nodes = get_alive_nodes(probe_nodes)
+    print(f"Topologie-Schnappschuss: {len(alive_nodes)}/{NUM_NODES} Knoten erreichbar.")
+    if not alive_nodes:
+        print("Keine Knoten erreichbar! Abbruch.")
+        return []
+
+    node_set = set(alive_nodes)
+    dummy = np.zeros(DIMENSION, dtype=np.float32).tobytes()
+    G = nx.DiGraph()
+    G.add_nodes_from(alive_nodes)
+    for n in alive_nodes:
+        channel = grpc.insecure_channel(n)
+        try:
+            stub = p2p_pb2_grpc.VectorStoreStub(channel)
+            req = p2p_pb2.QueryNodeRequest(query=p2p_pb2.Vector(values=dummy), k=1)
+            resp = stub.QueryNode(req, timeout=3.0)
+            for nb in resp.neighbors:
+                if nb.target in node_set:
+                    G.add_edge(n, nb.target)
+        except grpc.RpcError:
+            pass
+        finally:
+            channel.close()
+
+    entry = alive_nodes[0]
+    degrees = [G.out_degree(n) for n in alive_nodes]
+    reachable_set = nx.descendants(G, entry) | {entry}
+    reach_directed = len(reachable_set)
+    largest_scc = max((len(c) for c in nx.strongly_connected_components(G)), default=0)
+    reach_sym = len(nx.node_connected_component(G.to_undirected(), entry))
+
+    print(f"  Knotengrad min/mean/max = {min(degrees)}/{np.mean(degrees):.2f}/{max(degrees)}  "
+          f"erreichbar(gerichtet)={reach_directed}  groesste_SCC={largest_scc}  "
+          f"erreichbar(symmetrisiert)={reach_sym}")
+
+    rng = random.Random(SEED)
+    if os.path.exists("queries.npy"):
+        all_queries = np.load("queries.npy").astype(np.float32)
+        query_vec = all_queries[rng.randrange(len(all_queries))]
+    else:
+        query_vec = np.array([rng.gauss(0, 1) for _ in range(DIMENSION)], dtype=np.float32)
+    ttl = TTL_VALUES[0] if TTL_VALUES else 64
+    fanout_k = max(K * 4, 20)
+    visited_count = search_overlap = 0
+    channel = grpc.insecure_channel(entry)
+    try:
+        stub = p2p_pb2_grpc.VectorStoreStub(channel)
+        resp = stub.SearchSimilar(make_request(query_vec, K, ttl, fanout_k),
+                                  timeout=30.0)
+        visited_set = set(resp.visited_nodes)
+        visited_count = len(visited_set)
+        search_overlap = len(visited_set & reachable_set)
+    except grpc.RpcError as e:
+        print(f"  Topologie-Suche fehlgeschlagen: {e.code()}")
+    finally:
+        channel.close()
+
+    print(f"  Suche vom Einstiegsknoten: |besucht|={visited_count}  "
+          f"|erreichbar|={reach_directed}  Schnittmenge={search_overlap}")
+
+    return [{
+        "deg_min":          int(min(degrees)),
+        "deg_mean":         round(float(np.mean(degrees)), 3),
+        "deg_max":          int(max(degrees)),
+        "reach_directed":   int(reach_directed),
+        "largest_scc":      int(largest_scc),
+        "reach_sym":        int(reach_sym),
+        "search_visited":   int(visited_count),
+        "search_reachable": int(reach_directed),
+        "search_overlap":   int(search_overlap),
+        "alive_count":      len(alive_nodes),
+    }]
+
+
 if __name__ == "__main__":
-    run_evaluation()
+    run_evaluation()    

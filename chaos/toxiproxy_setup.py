@@ -1,3 +1,4 @@
+# Netzwerk-Fehlerinjektion (Latenz, Verbindungsabbrüche) über Toxiproxy.
 import json
 import urllib.request
 import urllib.error
@@ -5,7 +6,7 @@ import urllib.error
 from config import (
     TOXIPROXY_HOST, TOXIPROXY_API_PORT,
     REAL_PORT_START, PROXY_PORT_START,
-    TOXIC_CONN_DROP_PCT, LATENCY_PRESETS,
+    LATENCY_PRESETS,
 )
 
 _BASE = f"http://{TOXIPROXY_HOST}:{TOXIPROXY_API_PORT}"
@@ -60,8 +61,6 @@ def setup_proxies(num_nodes: int):
 
 
 def apply_latency_scenario(num_nodes: int, scenario: str):
-    """Entfernt vorhandene latency-toxics und setzt sie fürs Szenario neu.
-    loss-toxics bleiben unberührt. Zur Laufzeit aufrufbar."""
     if scenario not in LATENCY_PRESETS:
         raise ValueError(f"Unbekanntes Szenario: {scenario}")
     latency_ms, jitter_ms = LATENCY_PRESETS[scenario]
@@ -85,9 +84,12 @@ def apply_latency_scenario(num_nodes: int, scenario: str):
 
 
 def add_connection_drops(num_nodes: int):
-    if TOXIC_CONN_DROP_PCT <= 0:
+    import importlib, config as _c
+    importlib.reload(_c)
+    pct = _c.TOXIC_CONN_DROP_PCT
+    if pct <= 0:
         return
-    toxicity = TOXIC_CONN_DROP_PCT / 100.0
+    toxicity = pct / 100.0
     for i in range(num_nodes):
         name = f"node_{i}"
         _api("POST", f"/proxies/{name}/toxics", {
@@ -99,7 +101,7 @@ def add_connection_drops(num_nodes: int):
         })
         print(
             f"[Toxiproxy] Verbindungsabbruch-Toxic auf {name}: "
-            f"{TOXIC_CONN_DROP_PCT}% Verbindungsabbrüche (limit_data, 1 Byte, downstream)"
+            f"{pct}% Verbindungsabbrüche"
         )
 
 

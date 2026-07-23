@@ -1,3 +1,4 @@
+# Übernommen aus dem TEXMEX-Korpus (ANN_SIFT1M), http://corpus-texmex.irisa.fr/.
 import os
 import tarfile
 import urllib.request
@@ -19,7 +20,7 @@ def download():
     print("Lade SIFT1M herunter...")
     try:
         urllib.request.urlretrieve(SIFT_URL, archive_path)
-    except Exception as e:
+    except Exception:
         urllib.request.urlretrieve(SIFT_HTTP_MIRROR, archive_path)
 
     print("Entpacke...")

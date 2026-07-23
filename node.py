@@ -4,22 +4,30 @@ import p2p_pb2
 import p2p_pb2_grpc
 import numpy as np
 import faiss
+faiss.omp_set_num_threads(1)
 import random
 import sys
-from config import HNSW_M, DIMENSION, ROUTING_STRATEGY, EARLY_STOP_ENABLED, EARLY_STOP_THRESHOLD
+import signal
+from config import HNSW_M, DIMENSION, ROUTING_STRATEGY
 
 class LocalGraphState:
     def __init__(self, dimension=DIMENSION, M=HNSW_M, rng=None):
         self.dimension = dimension
+        # Angelehnt an [malkov2020hnsw], [douze2024faiss].
         self.local_index = faiss.IndexHNSWFlat(dimension, M)
+        self.local_index.hnsw.efSearch = 64
         self.global_ids = []
         self.neighbors = {}
+        self.bootstrap_seeds = []
         self.rng = rng or random.Random()
+        self._summary_cache = None
+        self._summary_lock = asyncio.Lock()
 
-    async def insert_local(self, vector, global_id):
-        vec_np = np.array([vector], dtype=np.float32)
-        await asyncio.to_thread(self.local_index.add, vec_np)
-        self.global_ids.append(global_id)
+    async def insert_batch(self, vectors, global_ids):
+        arr = np.ascontiguousarray(vectors, dtype=np.float32)
+        await asyncio.to_thread(self.local_index.add, arr)
+        self.global_ids.extend(int(g) for g in global_ids)
+        self._summary_cache = None
 
     async def search_local(self, query_vector, k, my_ip, my_port):
         if self.local_index.ntotal == 0:
@@ -34,27 +42,27 @@ class LocalGraphState:
         results.sort(key=lambda x: x[2])
         return results[:k]
 
+    # Angelehnt an [jegou2011pq].
     async def compute_summary(self, R=8):
-        n = self.local_index.ntotal
-        if n == 0:
-            return b"", 0
+        async with self._summary_lock:
+            if self._summary_cache is not None:
+                return self._summary_cache
 
-        def _run():
-            vecs = self.local_index.reconstruct_n(0, n).astype(np.float32)
-            if n < R:
-                centroid = vecs.mean(axis=0, keepdims=True).astype(np.float32)
-                return centroid.tobytes(), 1
-            kmeans = faiss.Kmeans(self.dimension, R, niter=20, verbose=False)
-            kmeans.train(vecs)
-            return kmeans.centroids.astype(np.float32).tobytes(), R
+            n = self.local_index.ntotal
+            if n == 0:
+                return b"", 0
 
-        return await asyncio.to_thread(_run)
+            def _run():
+                vecs = self.local_index.reconstruct_n(0, n).astype(np.float32)
+                if n < R:
+                    centroid = vecs.mean(axis=0, keepdims=True).astype(np.float32)
+                    return centroid.tobytes(), 1
+                kmeans = faiss.Kmeans(self.dimension, R, niter=20, verbose=False)
+                kmeans.train(vecs)
+                return kmeans.centroids.astype(np.float32).tobytes(), R
 
-    async def get_my_latest_vector(self):
-        if self.local_index.ntotal == 0:
-            return [0.0] * self.dimension
-        idx = self.rng.randint(0, self.local_index.ntotal - 1)
-        return (await asyncio.to_thread(self.local_index.reconstruct, idx)).tolist()
+            self._summary_cache = await asyncio.to_thread(_run)
+            return self._summary_cache
 
     def evaluate_next_hop(self, query_vector, visited_peers, fanout=2):
         visited_set = set(visited_peers)
@@ -63,20 +71,31 @@ class LocalGraphState:
         if not unvisited:
             return {"action": "stop", "targets": []}
 
+        # Angelehnt an [lv2002search].
         if ROUTING_STRATEGY == 'flood':
             return {"action": "hop", "targets": unvisited}
 
+        # Angelehnt an [lv2002search].
         if ROUTING_STRATEGY == 'random':
             return {"action": "hop",
                     "targets": self.rng.sample(unvisited, min(fanout, len(unvisited)))}
 
+        # Angelehnt an [malkov2020hnsw].
         query_np = np.array(query_vector, dtype=np.float32)
 
         def _dist(t):
             s = self.neighbors[t]
             return float("inf") if s is None else float(np.min(np.sum((s - query_np) ** 2, axis=1)))
 
-        return {"action": "hop", "targets": sorted(unvisited, key=_dist)[:fanout]}
+        best = min(unvisited, key=_dist)
+        try:
+            _d, _i = self.local_index.search(query_np.reshape(1, -1), 1)
+            own = float(_d[0][0]) if _i[0][0] >= 0 and np.isfinite(_d[0][0]) else float("inf")
+        except Exception:
+            own = float("inf")
+        if _dist(best) >= own:
+            return {"action": "stop", "targets": []}
+        return {"action": "hop", "targets": [best]}
 
     def add_neighbor_edge(self, ip, port):
         target = f"{ip}:{port}"
@@ -131,8 +150,8 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
         rpc_count = 1
         visited_nodes = {my_id}
 
-        _skip_forward = (EARLY_STOP_ENABLED and bool(local_res)
-                         and local_res[0][2] <= EARLY_STOP_THRESHOLD)
+        _skip_forward = (request.early_stop_threshold > 0 and bool(local_res)
+                         and local_res[0][2] <= request.early_stop_threshold)
 
         if request.ttl > 0 and not _skip_forward:
             remote_result = await self.router.distributed_search(
@@ -194,6 +213,10 @@ class VectorStoreServicer(p2p_pb2_grpc.VectorStoreServicer):
         return response
 
     async def Ping(self, request, context):
+        if (request.register and request.sender_port > 0
+                and not (request.sender_ip == "127.0.0.1"
+                         and request.sender_port == self.port)):
+            self.local_graph.add_neighbor_edge(request.sender_ip, request.sender_port)
         summary_bytes, summary_count = await self.local_graph.compute_summary()
         return p2p_pb2.PingResponse(
             alive=True,
@@ -209,20 +232,19 @@ async def serve(real_port, bootstrap_port=None, node_id=0, proxy_port=None, seed
 
     try:
         from config import VECTORS_PER_NODE, NUM_NODES, REPLICATION, PLACEMENT
-        dataset = np.load("dataset.npy")
+        dataset = np.load("dataset.npy", mmap_mode="r")
 
         if PLACEMENT == 'clustered':
             partition = np.load("partition.npy")
             my_ids = np.where(partition == node_id)[0]
-            for gid in my_ids:
-                await local_graph.insert_local(dataset[gid].tolist(), int(gid))
+            await local_graph.insert_batch(dataset[my_ids], my_ids.tolist())
             print(f"[Node {proxy_port}] ID {node_id}: {len(my_ids)} Vektoren geladen (clustered).")
 
+            # Angelehnt an [stoica2001chord].
             if REPLICATION:
                 replica_id = (node_id + 1) % NUM_NODES
                 replica_ids = np.where(partition == replica_id)[0]
-                for gid in replica_ids:
-                    await local_graph.insert_local(dataset[gid].tolist(), int(gid))
+                await local_graph.insert_batch(dataset[replica_ids], replica_ids.tolist())
                 print(f"[Node {proxy_port}] Replikat von ID {replica_id}: "
                       f"{len(replica_ids)} Vektoren geladen.")
         else:
@@ -234,28 +256,33 @@ async def serve(real_port, bootstrap_port=None, node_id=0, proxy_port=None, seed
                     "Bitte `python generate_data.py` erneut ausführen."
                 )
             my_chunk = dataset[start_idx:start_idx + chunk_size]
-            for j, vec in enumerate(my_chunk):
-                await local_graph.insert_local(vec.tolist(), start_idx + j)
+            await local_graph.insert_batch(
+                my_chunk, list(range(start_idx, start_idx + len(my_chunk))))
             print(f"[Node {proxy_port}] ID {node_id}: {len(my_chunk)} Vektoren geladen (contiguous).")
 
+            # Angelehnt an [stoica2001chord].
             if REPLICATION:
                 replica_id = (node_id + 1) % NUM_NODES
                 replica_start = replica_id * chunk_size
                 replica_chunk = dataset[replica_start:replica_start + chunk_size]
-                for j, vec in enumerate(replica_chunk):
-                    await local_graph.insert_local(vec.tolist(), replica_start + j)
+                await local_graph.insert_batch(
+                    replica_chunk,
+                    list(range(replica_start, replica_start + len(replica_chunk))))
                 print(f"[Node {proxy_port}] Replikat von ID {replica_id}: "
                       f"{len(replica_chunk)} Vektoren geladen.")
     except FileNotFoundError as e:
         print(f"[Node {proxy_port}] Fehler: {e}")
 
+    # Angelehnt an [stoica2001chord], [maymounkov2002kademlia].
     if bootstrap_port and bootstrap_port != "None":
         local_graph.add_neighbor_edge("127.0.0.1", int(bootstrap_port))
+        local_graph.bootstrap_seeds.append(int(bootstrap_port))
 
     from protocol import DistributedRouter
     router = DistributedRouter("127.0.0.1", proxy_port, rng=rng)
 
     asyncio.create_task(router.health_check_loop(local_graph))
+    # Angelehnt an [ormandi2013gossip], [demers1987epidemic], [jelasity2007peersampling].
     asyncio.create_task(router.start_gossip_loop(local_graph))
 
     server = grpc.aio.server()
@@ -267,7 +294,16 @@ async def serve(real_port, bootstrap_port=None, node_id=0, proxy_port=None, seed
     server.add_insecure_port(f'127.0.0.1:{real_port}')
 
     await server.start()
-    await server.wait_for_termination()
+
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for _sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(_sig, stop_event.set)
+        except NotImplementedError:
+            pass
+    await stop_event.wait()
+    await server.stop(2)
 
 if __name__ == '__main__':
     real_p = int(sys.argv[1]) if len(sys.argv) > 1 else 5000

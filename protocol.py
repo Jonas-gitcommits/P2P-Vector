@@ -7,7 +7,10 @@ import random
 from config import (
     GOSSIP_INTERVAL_S, HEALTH_CHECK_INTERVAL_S, PING_TIMEOUT_S,
     RPC_TIMEOUT_BASE_S, LATENCY_PRESETS, LATENCY_SCENARIO, ROUTING_ALPHA,
-    ROUTING_EF, ROUTING_DEBUG, ROUTING_FANOUT,
+    ROUTING_EF, ROUTING_DEBUG, ROUTING_FANOUT, BIDIRECTIONAL_NEIGHBORS,
+    RANDOM_GOSSIP, LOOP_JITTER, FAILURE_STRIKES,
+    BOUNDED_VIEW, MAX_NEIGHBORS, EXPLORE_FRACTION, PEER_SHUFFLE,
+    FARTHEST_ANCHOR, FAR_RANDOM_BIAS, PROTECT_SEED_EDGES,
 )
 
 class DistributedRouter:
@@ -16,11 +19,26 @@ class DistributedRouter:
         self.my_port = my_port
         self._channel_pool = {}
         self.rng = rng or random.Random()
+        self._ping_failures = {}
+        self._reference_vector = None
 
     def _get_channel(self, target: str):
         if target not in self._channel_pool:
             self._channel_pool[target] = grpc.aio.insecure_channel(target)
         return self._channel_pool[target]
+
+    async def announce_peer(self, target: str):
+        channel = self._get_channel(target)
+        stub = p2p_pb2_grpc.VectorStoreStub(channel)
+        try:
+            await stub.Ping(
+                p2p_pb2.PingRequest(
+                    sender_ip=self.my_ip,
+                    sender_port=self.my_port,
+                    register=True),
+                timeout=PING_TIMEOUT_S)
+        except Exception:
+            pass
 
     async def ask_neighbor_for_vectors(self, target, query_vector, k, ttl, visited_peers,
                                        kth_dist=0.0, fanout_k=0, early_stop_threshold=0.0):
@@ -43,7 +61,8 @@ class DistributedRouter:
         )
 
         lat_ms, jitter_ms = LATENCY_PRESETS.get(LATENCY_SCENARIO, (0, 0))
-        timeout = ttl * (lat_ms + jitter_ms) / 1000 + RPC_TIMEOUT_BASE_S
+        per_hop = 2 * (lat_ms + jitter_ms) / 1000 + 0.1
+        timeout = RPC_TIMEOUT_BASE_S + ttl * per_hop
 
         try:
             response = await stub.SearchSimilar(request, timeout=timeout)
@@ -83,25 +102,27 @@ class DistributedRouter:
 
         targets = decision["targets"]
 
-        visited_with_siblings = list(set(visited_peers) | set(targets))
-
-        tasks = [
-            self.ask_neighbor_for_vectors(
-                target, query_vector, k, ttl - 1, visited_with_siblings,
-                kth_dist=kth_dist, fanout_k=fanout_k, early_stop_threshold=early_stop_threshold
-            )
-            for target in targets
-        ]
-
-        results = await asyncio.gather(*tasks)
+        running_visited = set(visited_peers) | set(targets)
 
         combined_results = []
         total_rpcs = 0
         all_visited = set()
-        for r in results:
+
+        for target in targets:
+            if target in all_visited:
+                continue
+
+            r = await self.ask_neighbor_for_vectors(
+                target, query_vector, k, ttl - 1, list(running_visited),
+                kth_dist=kth_dist, fanout_k=fanout_k, early_stop_threshold=early_stop_threshold
+            )
+
             combined_results.extend(r["peers"])
             total_rpcs += r["rpc_count"]
-            all_visited |= r["visited_nodes"]
+
+            newly_visited = r["visited_nodes"] | {target}
+            all_visited |= newly_visited
+            running_visited |= newly_visited
 
         combined_results.sort(key=lambda x: x[2])
         unique_results = []
@@ -121,8 +142,10 @@ class DistributedRouter:
             query=p2p_pb2.Vector(values=query_bytes),
             k=k,
         )
+        lat_ms, jitter_ms = LATENCY_PRESETS.get(LATENCY_SCENARIO, (0, 0))
+        timeout = RPC_TIMEOUT_BASE_S + 2 * (lat_ms + jitter_ms) / 1000
         try:
-            response = await stub.QueryNode(request, timeout=RPC_TIMEOUT_BASE_S)
+            response = await stub.QueryNode(request, timeout=timeout)
             peers = [
                 (p.ip, p.port, d, gid)
                 for p, d, gid in zip(
@@ -140,6 +163,7 @@ class DistributedRouter:
         except grpc.RpcError:
             return None
 
+    # Angelehnt an [malkov2020hnsw], [maymounkov2002kademlia].
     async def iterative_search(self, local_graph, query_vector, k, ttl):
         query_np = np.array(query_vector, dtype=np.float32)
         my_id = f"{self.my_ip}:{self.my_port}"
@@ -187,19 +211,17 @@ class DistributedRouter:
 
             batch = [t for _, t in candidates[:ROUTING_ALPHA]]
             queried.update(batch)
-            visited_nodes.update(batch)
-
-            for t in batch:
-                if t not in first_hop_neighbors:
-                    non_first_hop_count += 1
 
             tasks = [self.query_node(t, query_vector, k) for t in batch]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            for result in results:
+            for target, result in zip(batch, results):
                 if result is None or isinstance(result, Exception):
                     continue
                 rpc_count += 1
+                visited_nodes.add(target)
+                if target not in first_hop_neighbors:
+                    non_first_hop_count += 1
                 global_top.extend(result["peers"])
                 for nb_target, nb_summary in result["neighbor_summaries"].items():
                     if nb_target in queried or nb_target == my_id:
@@ -226,14 +248,58 @@ class DistributedRouter:
 
         return {"peers": final[:k], "rpc_count": rpc_count, "visited_nodes": visited_nodes}
 
+    def _get_reference_vector(self, local_graph):
+        if self._reference_vector is None:
+            n = local_graph.local_index.ntotal
+            if n > 0:
+                vecs = local_graph.local_index.reconstruct_n(0, n)
+                self._reference_vector = np.asarray(vecs, dtype=np.float32).mean(axis=0)
+        return self._reference_vector
+
+    def _reseed_if_isolated(self, local_graph):
+        if local_graph.neighbors:
+            return
+        for seed_port in local_graph.bootstrap_seeds:
+            if seed_port != self.my_port:
+                local_graph.add_neighbor_edge(self.my_ip, seed_port)
+
     async def start_gossip_loop(self, local_graph):
+        if LOOP_JITTER:
+            await asyncio.sleep(self.rng.uniform(0.0, GOSSIP_INTERVAL_S))
         while True:
             await asyncio.sleep(GOSSIP_INTERVAL_S)
+            self._reseed_if_isolated(local_graph)
             if not local_graph.neighbors:
                 continue
 
+            my_target = f"{self.my_ip}:{self.my_port}"   
+            if (RANDOM_GOSSIP and local_graph.bootstrap_seeds
+                    and self.rng.random() < 0.5):
+                seed_port = self.rng.choice(local_graph.bootstrap_seeds)
+                seed_target = f"{self.my_ip}:{seed_port}"
+                if seed_target != my_target:
+                    try:
+                        dummy_vec = [0.0] * local_graph.dimension
+                        result = await self.query_node(seed_target, dummy_vec, k=1)
+                        if result and result.get("neighbor_summaries"):
+                            remote = [p for p in result["neighbor_summaries"].keys()
+                                      if p != my_target]
+                            if remote:
+                                sampled = self.rng.sample(remote, min(2, len(remote)))
+                                for peer_addr in sampled:
+                                    parts = peer_addr.split(":")
+                                    if len(parts) != 2:
+                                        continue
+                                    rip, rport = parts[0], int(parts[1])
+                                    is_new = peer_addr not in local_graph.neighbors
+                                    local_graph.add_neighbor_edge(rip, rport)
+                                    if BIDIRECTIONAL_NEIGHBORS and is_new:
+                                        asyncio.create_task(self.announce_peer(peer_addr))
+                    except Exception:
+                        pass
+                continue  
+
             target = self.rng.choice(list(local_graph.neighbors.keys()))
-            my_target = f"{self.my_ip}:{self.my_port}"
 
             candidates = [s for s in local_graph.neighbors.values() if s is not None]
             if candidates:
@@ -249,11 +315,47 @@ class DistributedRouter:
                 for ip, port, _dist, _gid in results["peers"]:
                     if ip == self.my_ip and port == self.my_port:
                         continue
+                    peer_addr = f"{ip}:{port}"
+                    is_new = peer_addr not in local_graph.neighbors
                     local_graph.add_neighbor_edge(ip, port)
+                    if BIDIRECTIONAL_NEIGHBORS and is_new:
+                        asyncio.create_task(self.announce_peer(peer_addr))
             except Exception:
                 pass
-  
+
+            
+            # Angelehnt an [jelasity2007peersampling].
+            if PEER_SHUFFLE:
+                seed_targets = {f"{self.my_ip}:{p}" for p in local_graph.bootstrap_seeds}
+                shuffle_candidates = [
+                    t for t in local_graph.neighbors
+                    if t != my_target and t not in seed_targets
+                ]
+                if shuffle_candidates:
+                    shuffle_target = self.rng.choice(shuffle_candidates)
+                    try:
+                        dummy_vec = [0.0] * local_graph.dimension
+                        result = await self.query_node(shuffle_target, dummy_vec, k=1)
+                        if result and result.get("neighbor_summaries"):
+                            remote = [p for p in result["neighbor_summaries"].keys()
+                                      if p != my_target]
+                            if remote:
+                                count = min(self.rng.randint(1, 2), len(remote))
+                                for peer_addr in self.rng.sample(remote, count):
+                                    parts = peer_addr.split(":")
+                                    if len(parts) != 2:
+                                        continue
+                                    rip, rport = parts[0], int(parts[1])
+                                    is_new = peer_addr not in local_graph.neighbors
+                                    local_graph.add_neighbor_edge(rip, rport)
+                                    if BIDIRECTIONAL_NEIGHBORS and is_new:
+                                        asyncio.create_task(self.announce_peer(peer_addr))
+                    except Exception:
+                        pass
+
     async def health_check_loop(self, local_graph):
+        if LOOP_JITTER:
+            await asyncio.sleep(self.rng.uniform(0.0, HEALTH_CHECK_INTERVAL_S))
         while True:
             await asyncio.sleep(HEALTH_CHECK_INTERVAL_S)
 
@@ -273,11 +375,15 @@ class DistributedRouter:
             dead_targets = []
             for target, response in results:
                 if response is None:
-                    dead_targets.append(target)
-                elif response.summary_count > 0 and response.summary:
-                    local_graph.neighbors[target] = np.frombuffer(
-                        response.summary, dtype=np.float32
-                    ).reshape(response.summary_count, -1).copy()
+                    self._ping_failures[target] = self._ping_failures.get(target, 0) + 1
+                    if self._ping_failures[target] >= FAILURE_STRIKES:
+                        dead_targets.append(target)
+                else:
+                    self._ping_failures[target] = 0
+                    if response.summary_count > 0 and response.summary:
+                        local_graph.neighbors[target] = np.frombuffer(
+                            response.summary, dtype=np.float32
+                        ).reshape(response.summary_count, -1).copy()
 
             for target in dead_targets:
                 if target in local_graph.neighbors:
@@ -285,3 +391,50 @@ class DistributedRouter:
                 if target in self._channel_pool:
                     await self._channel_pool[target].close()
                     del self._channel_pool[target]
+                self._ping_failures.pop(target, None)
+
+            # Angelehnt an [jelasity2007peersampling], [voulgaris2005cyclon].
+            if BOUNDED_VIEW and len(local_graph.neighbors) > MAX_NEIGHBORS:
+                ref = self._get_reference_vector(local_graph)
+
+                def _nb_dist(t):
+                    s = local_graph.neighbors[t]
+                    if s is None or ref is None:
+                        return float("inf")
+                    return float(np.min(np.sum((s - ref) ** 2, axis=1)))
+
+                protected = set()
+                if PROTECT_SEED_EDGES:
+                    protected = {f"{self.my_ip}:{p}" for p in local_graph.bootstrap_seeds}
+                    protected &= set(local_graph.neighbors)
+                budget = max(0, MAX_NEIGHBORS - len(protected))
+
+                K_rand = round(EXPLORE_FRACTION * budget)
+                K_sim = budget - K_rand
+
+                ranked = sorted((t for t in local_graph.neighbors if t not in protected),
+                                key=_nb_dist)
+                keep = protected | set(ranked[:K_sim])
+                rest = ranked[K_sim:]              
+
+                pool = list(rest)
+                slots = K_rand
+                if FARTHEST_ANCHOR and slots > 0 and pool:
+                    keep.add(pool.pop())            
+                    slots -= 1
+                if slots > 0 and pool:
+                    if FAR_RANDOM_BIAS:
+                        far_half = pool[len(pool) // 2:]   
+                        keep.update(self.rng.sample(far_half, min(slots, len(far_half))))
+                    else:
+                        keep.update(self.rng.sample(pool, min(slots, len(pool))))
+
+                evict = [t for t in local_graph.neighbors if t not in keep]
+                for target in evict:
+                    del local_graph.neighbors[target]
+                    if target in self._channel_pool:
+                        await self._channel_pool[target].close()
+                        del self._channel_pool[target]
+                    self._ping_failures.pop(target, None)
+
+            self._reseed_if_isolated(local_graph)

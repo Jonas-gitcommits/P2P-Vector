@@ -1,30 +1,43 @@
 import numpy as np
 import os
-import struct
+import sys
 import faiss
 from config import SUBSET_SIZE, NUM_NODES, DATASET, IR_CORPUS_CACHE, IR_QUERIES_CACHE
 
 SIFT_DIR = "sift_data/sift"
 
 
+# Übernommen aus facebookresearch/faiss, contrib/vecs_io.py [douze2024faiss].
+def ivecs_read(fname):
+    a = np.fromfile(fname, dtype='int32')
+    if sys.byteorder == 'big':
+        a.byteswap(inplace=True)
+    d = a[0]
+    return a.reshape(-1, d + 1)[:, 1:].copy()
+
+def fvecs_read(fname):
+    return ivecs_read(fname).view('float32')
+
+def ivecs_mmap(fname):
+    assert sys.byteorder != 'big'
+    a = np.memmap(fname, dtype='int32', mode='r')
+    d = a[0]
+    return a.reshape(-1, d + 1)[:, 1:]
+
+def fvecs_mmap(fname):
+    return ivecs_mmap(fname).view('float32')
+
+
 def read_fvecs(path, max_count=None):
-    vecs = []
-    with open(path, "rb") as f:
-        while True:
-            dim_bytes = f.read(4)
-            if not dim_bytes:
-                break
-            dim = struct.unpack("<i", dim_bytes)[0]
-            vec = np.frombuffer(f.read(dim * 4), dtype=np.float32)
-            vecs.append(vec)
-            if max_count is not None and len(vecs) >= max_count:
-                break
-    return np.array(vecs, dtype=np.float32)
+    vecs = fvecs_mmap(path)
+    if max_count is not None:
+        vecs = vecs[:max_count]
+    return np.ascontiguousarray(vecs, dtype=np.float32)
 
 
 def _verify_norms(embs, label, n=200):
     norms = np.linalg.norm(embs[:n], axis=1)
-    assert np.allclose(norms, 1.0, atol=1e-5), f"{label}: Normen nicht alle ≈ 1!"
+    assert np.allclose(norms, 1.0, atol=1e-5), f"{label}: Normen nicht alle = 1"
 
 
 def _compute_partition(embs):
@@ -46,8 +59,8 @@ def _compute_partition(embs):
         for i in range(NUM_NODES)
         for j in range(i + 1, NUM_NODES)
     ]
-    print(f"  Paarweise Zentroid-Distanzen (L2):  "
-          f"min={min(dists):.3f}  Ø={np.mean(dists):.3f}  max={max(dists):.3f}")
+    print(f"  L2:  "
+          f"min={min(dists):.3f}  Durchschnitt={np.mean(dists):.3f}  max={max(dists):.3f}")
 
     return partition
 
@@ -82,11 +95,11 @@ def _generate_ir():
     print("Lade IR-Cache...")
     all_corpus  = np.load(IR_CORPUS_CACHE)
     all_queries = np.load(IR_QUERIES_CACHE)
-    print(f"  Korpus-Cache: {all_corpus.shape}  Query-Cache: {all_queries.shape}")
+    print(f"  Corpus-Cache: {all_corpus.shape}  Query-Cache: {all_queries.shape}")
 
     if SUBSET_SIZE > len(all_corpus):
         raise RuntimeError(
-            f"SUBSET_SIZE ({SUBSET_SIZE:,}) > Korpus-Cache ({len(all_corpus):,}). "
+            f"SUBSET_SIZE ({SUBSET_SIZE:,}) > Corpus-Cache ({len(all_corpus):,}). "
             f"Reduziere NUM_NODES * VECTORS_PER_NODE auf max. {len(all_corpus):,} in config.py."
         )
 

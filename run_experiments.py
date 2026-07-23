@@ -1,61 +1,64 @@
-import os, re, sys, csv, time, signal, subprocess, urllib.request
+import os, re, sys, csv, time, signal, subprocess, urllib.request, math
 from datetime import datetime
 import numpy as np
 from scipy.stats import t as _t_dist
 from evaluate import run_evaluation
+from config import RPC_TIMEOUT_BASE_S
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY   = sys.executable
 
-PROFILE    = "standard"
-SMOKE_TEST = False
+PROFILE    = "final_overlay"
 
 IR_CORPUS_SIZE = 200_000
 BASE_SEED = 1234
 
-EARLY_STOP_THRESHOLDS = {"sift": 65000.0, "ir": 0.90}
-FAULT_PROFILE = dict(FAULT_KILL_INTERVAL=8.0, FAULT_KILL_PROBABILITY=0.4, FAULT_RESTART_DELAY=6.0)
-
 PROFILES = {
-    "standard": dict(
-        DATASETS=["ir", "sift"],
-        TOTAL_VECTORS=20000, N_BASE=20, N_LIST_SCALE=[10, 20, 30, 50],
-        NUM_QUERIES=300, NUM_QUERIES_LATENCY=150, NUM_RUNS=5,
-        GOSSIP_WARMUP_S=30,
-        TTL_CORE=[2, 4, 6], TTL_CHURN=[4, 6], TTL_LATENCY=[4],
-        FANOUT_LIST=[1, 2, 3, 4], WARMUP_LIST=[0, 10, 30],
-        CONNDROP_LIST=[0, 10, 30], FAULT_LEVELS=[0, 2, 4],
-        NETWORK_BOOT_WAIT=6,
-    ),
-    "long": dict(
-        DATASETS=["ir", "sift"],
-        TOTAL_VECTORS=200000, N_BASE=20, N_LIST_SCALE=[10, 20, 50, 100, 200],
-        NUM_QUERIES=1000, NUM_QUERIES_LATENCY=400, NUM_RUNS=5,
-        GOSSIP_WARMUP_S=40,
-        TTL_CORE=[2, 4, 6, 8], TTL_CHURN=[4, 6, 8], TTL_LATENCY=[4, 6],
-        FANOUT_LIST=[1, 2, 3, 4, 6, 8], WARMUP_LIST=[0, 5, 10, 20, 40, 60],
-        CONNDROP_LIST=[0, 5, 10, 20, 40], FAULT_LEVELS=[0, 2, 4, 8],
-        NETWORK_BOOT_WAIT=12,
+    "final_overlay": dict(
+        TOTAL_VECTORS=20000,
+        NUM_QUERIES=300, NUM_QUERIES_LARGE=150, NUM_RUNS=20,
+        GOSSIP_WARMUP_S=60, NETWORK_BOOT_WAIT=12,
+        OVERLAY_ONLY=True,
+        TIER1=20, TIER2=20,
+        FINAL_ACTIVE_BLOCKS=[1, 2, 3, 4, 5, 6],
+        FINAL_ACTIVE_N=[200, 500, 750, 1000, 1250],
     ),
 }
 P = PROFILES[PROFILE]
 PORT_RELEASE_WAIT = 4
 
-if SMOKE_TEST:
-    P = dict(P)
-    P.update(TOTAL_VECTORS=20000, N_LIST_SCALE=[10], NUM_QUERIES=20,
-             NUM_QUERIES_LATENCY=20, NUM_RUNS=3, GOSSIP_WARMUP_S=30,
-             NETWORK_BOOT_WAIT=6)
+RUN = "all"  
+
+_ALL_BLOCKS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+_ALL_N      = [50, 200, 500, 750, 1000, 1250]
+_ALL_N_FULL = [50, 100, 200, 500, 750, 1000, 1250]
+
+RUN_AXES = {
+    "routing":    ([1], _ALL_N,       "results_routing.csv"),
+    "ablation":   ([2], [500],           "results_ablation.csv"),
+    "ablation1000": ([2], [1000],        "results_ablation_1000.csv"),
+    "parameter":  ([3], [500],           "results_parameter.csv"),
+    "seeds":      ([4], _ALL_N,          "results_seeds.csv"),
+    "scaling":    ([5], [500, 750, 1000, 1250], "results_scaling.csv"),
+    "robustheit": ([6], [500],           "results_robustheit.csv"),
+    "vorstudie":  ([7], [100, 200],      "results_vorstudie.csv"),
+    "warmup":     ([8], [1000],          "results_warmup.csv"),
+    "ksweep":     ([9],  [1000],         "results_ksweep.csv"),
+    "dichte":     ([10], [1000],         "results_dichte.csv"),
+    "all":        (_ALL_BLOCKS, _ALL_N_FULL, "results_all.csv"),
+}
+_RUN_BLOCKS, _RUN_N, _RUN_CSV_NAME = RUN_AXES[RUN]
+P["FINAL_ACTIVE_BLOCKS"] = _RUN_BLOCKS
+P["FINAL_ACTIVE_N"]      = _RUN_N
 
 VAR_PLACEMENT = "PLACEMENT"
 VAR_ROUTING   = "ROUTING_STRATEGY"
 VAR_FANOUT    = "ROUTING_FANOUT"
-VAR_WARMUP    = "GOSSIP_WARMUP_S"
 VAR_CONNDROP  = "TOXIC_CONN_DROP_PCT"
 VAR_ALPHA     = "ROUTING_ALPHA"
 VAR_EF        = "ROUTING_EF"
 
-OUT_CSV  = os.path.join(HERE, "experiment_results.csv")
+OUT_CSV  = os.path.join(HERE, _RUN_CSV_NAME)
 CONFIG   = os.path.join(HERE, "config.py")
 START = time.time()
 _all_rows, _sim_proc, _tox_proc, _done, _total = [], None, None, 0, 0
@@ -70,9 +73,6 @@ def elapsed():
     s = int(time.time() - START)
     return f"{s // 3600}h{(s % 3600) // 60:02d}m"
 
-def _iter(routing):
-    return {VAR_ALPHA: 3, VAR_EF: 16} if routing == "iterative" else {}
-
 def _total_for(ds):
     return min(P["TOTAL_VECTORS"], IR_CORPUS_SIZE) if ds == "ir" else P["TOTAL_VECTORS"]
 
@@ -82,20 +82,26 @@ def _meta(block, placement, routing, n, vpn, fmd, repl, scen, dataset):
                 latency_scenario=scen, dataset=dataset)
 
 def meta_str(m):
-    extra = "".join(f" {k}={m[k]}" for k in ("fanout", "gossip_warmup_s", "conn_drop_pct", "early_stop") if k in m)
+    extra = "".join(f" {k}={m[k]}" for k in ("fanout", "gossip_warmup_s", "conn_drop_pct", "early_stop", "routing_ef", "ef_rule", "ttl_mode", "routing_alpha", "fanout_rule", "ttl_rule", "bidirectional", "random_gossip", "explore_fraction", "max_neighbors_coeff", "arm") if k in m)
     return (f"{m['block']} ds={m['dataset']} place={m['placement']} route={m['routing']} "
             f"N={m['num_nodes']} fault={m['fault_max_down']} repl={m['replication']} "
             f"lat={m['latency_scenario']}{extra}")
 
 def base_cfg(n, ttl, nq, total, **extra):
     cfg = {
-        "NUM_NODES": n, "VECTORS_PER_NODE": total // n,
+        "NUM_NODES": n, "NUM_SEED_NODES": 5, "VECTORS_PER_NODE": total // n,
         "NUM_QUERIES": nq, "NUM_RUNS": 1, "TTL_VALUES": list(ttl),
         "GOSSIP_WARMUP_S": P["GOSSIP_WARMUP_S"], "TOXIPROXY_ENABLED": False,
         "LATENCY_SCENARIO": "none", "FAULT_INJECTION_ENABLED": False,
         "FAULT_MAX_DOWN": 0, "REPLICATION": True, "EARLY_STOP_ENABLED": False,
-        VAR_PLACEMENT: "clustered", VAR_ROUTING: "greedy", VAR_FANOUT: 2,
-        VAR_CONNDROP: 0.0, VAR_ALPHA: 3, VAR_EF: 16, "ROUTING_DEBUG": False,
+        VAR_PLACEMENT: "clustered", VAR_ROUTING: "iterative", VAR_FANOUT: 2,
+        VAR_CONNDROP: 0.0, VAR_ALPHA: 3, VAR_EF: 64, "ROUTING_DEBUG": False,
+        "BIDIRECTIONAL_NEIGHBORS": True, "RANDOM_GOSSIP": False,
+        "BOUNDED_VIEW": True, "PEER_SHUFFLE": True, "FARTHEST_ANCHOR": False,
+        "FAR_RANDOM_BIAS": False, "INCREMENTAL_START": True, "LOOP_JITTER": True,
+        "FAILURE_STRIKES": 3, "MEASURE_TOPOLOGY": False,
+        "EXPLORE_FRACTION": 0.667, "MAX_NEIGHBORS_COEFF": 2.0,
+        "RPC_TIMEOUT_BASE_S": RPC_TIMEOUT_BASE_S,
     }
     cfg.update(extra)
     return cfg
@@ -151,10 +157,10 @@ def stop_toxiproxy():
 
 def start_network(n):
     global _sim_proc
-    subprocess.run(["pkill", "-f", "node.py"], stderr=subprocess.DEVNULL)
+    subprocess.run(["pkill", "-f", "node\\.py.*P2PVEC_MARKER"], stderr=subprocess.DEVNULL)
     time.sleep(1)
     _sim_proc = subprocess.Popen([PY, "simulator.py"], cwd=HERE, start_new_session=True)
-    time.sleep(P["NETWORK_BOOT_WAIT"] + 0.05 * n)
+    time.sleep(P["NETWORK_BOOT_WAIT"] + 0.12 * n)
 
 def stop_network():
     global _sim_proc
@@ -170,7 +176,7 @@ def stop_network():
         except Exception:
             pass
     _sim_proc = None
-    subprocess.run(["pkill", "-f", "node.py"], stderr=subprocess.DEVNULL)
+    subprocess.run(["pkill", "-f", "node\\.py.*P2PVEC_MARKER"], stderr=subprocess.DEVNULL)
     time.sleep(PORT_RELEASE_WAIT)
 
 def generate_data():
@@ -221,6 +227,10 @@ def _aggregate(run_rows):
     def _mean(rows, key):
         return round(float(np.nanmean([float(r[key]) for r in rows])), 4)
 
+    def _topo_mean(rows, key):
+        vals = [float(r[key]) for r in rows if r.get(key) is not None]
+        return round(float(np.mean(vals)), 4) if vals else None
+
     def _ci(vals, lo_bound=None, hi_bound=None):
         lo, hi = _t_ci(vals)
         if lo_bound is not None and not np.isnan(lo):
@@ -238,6 +248,24 @@ def _aggregate(run_rows):
         rci_lo,  rci_hi  = _ci(recalls,    0.0, 100.0)
         roci_lo, roci_hi = _ci(recalls_ok, 0.0, 100.0)
         lci_lo,  lci_hi  = _ci(lats)
+        alive_vals = [float(r["alive_count"]) for r in rows if r.get("alive_count") is not None]
+        wait_vals  = [float(r["ready_wait_s"]) for r in rows if r.get("ready_wait_s") is not None]
+        nbm_vals   = [float(r["neighbor_count_mean"]) for r in rows if r.get("neighbor_count_mean") is not None]
+        nbmin_vals = [float(r["neighbor_count_min"])  for r in rows if r.get("neighbor_count_min")  is not None]
+        nbmax_vals = [float(r["neighbor_count_max"])  for r in rows if r.get("neighbor_count_max")  is not None]
+        _reach_runs = [float(r["reach_mean"]) for r in rows
+                       if r.get("reach_mean") not in (None, "")]
+        lat_pool = []
+        for r in rows:
+            lat_pool.extend(r.get("_lat_samples") or [])
+        if lat_pool:
+            p50 = round(float(np.percentile(lat_pool, 50)), 4)
+            p95 = round(float(np.percentile(lat_pool, 95)), 4)
+            p99 = round(float(np.percentile(lat_pool, 99)), 4)
+        else:
+            p50 = _mean(rows, "latency_p50_ms")
+            p95 = _mean(rows, "latency_p95_ms")
+            p99 = _mean(rows, "latency_p99_ms")
         result.append({
             "ttl":                         ttl,
             "n_runs":                      len(rows),
@@ -252,11 +280,27 @@ def _aggregate(run_rows):
             "latency_mean_ms":             round(float(np.mean(lats)), 4),
             "latency_ci95_low":            lci_lo,
             "latency_ci95_high":           lci_hi,
-            "latency_p50_ms":              _mean(rows, "latency_p50_ms"),
-            "latency_p95_ms":              _mean(rows, "latency_p95_ms"),
-            "latency_p99_ms":              _mean(rows, "latency_p99_ms"),
+            "latency_p50_ms":              p50,
+            "latency_p95_ms":              p95,
+            "latency_p99_ms":              p99,
             "rpc_count_mean":              round(float(np.nanmean([float(r["rpc_count_mean"])    for r in rows])), 2),
             "unique_nodes_mean":           round(float(np.nanmean([float(r["unique_nodes_mean"]) for r in rows])), 2),
+            "alive_count_min":             int(min(alive_vals)) if alive_vals else None,
+            "ready_wait_s_max":            round(max(wait_vals), 1) if wait_vals else None,
+            "neighbor_count_mean":         round(float(np.mean(nbm_vals)), 2) if nbm_vals else None,
+            "neighbor_count_min":          int(min(nbmin_vals)) if nbmin_vals else None,
+            "neighbor_count_max":          int(max(nbmax_vals)) if nbmax_vals else None,
+            "reach_mean":                  _topo_mean(rows, "reach_mean"),
+            "reach_min":                   _topo_mean(rows, "reach_min"),
+            "reach_sym":                   _topo_mean(rows, "reach_sym"),
+            "largest_scc_frac":            _topo_mean(rows, "largest_scc_frac"),
+            "num_scc":                     _topo_mean(rows, "num_scc"),
+            "indeg_mean":                  _topo_mean(rows, "indeg_mean"),
+            "indeg_max":                   _topo_mean(rows, "indeg_max"),
+            "cross_cluster_frac":          _topo_mean(rows, "cross_cluster_frac"),
+            "topo_unresponsive":           _topo_mean(rows, "topo_unresponsive"),
+            "reach_run_min":               (round(min(_reach_runs), 4) if _reach_runs else None),
+            "reach_run_max":               (round(max(_reach_runs), 4) if _reach_runs else None),
         })
     return result
 
@@ -268,8 +312,9 @@ def run_condition(meta, cfg, regen):
     set_config(**cfg)
     if regen and not generate_data():
         return False
+    num_runs = meta.pop("num_runs", P["NUM_RUNS"])
     run_rows = []
-    for r in range(P["NUM_RUNS"]):
+    for r in range(num_runs):
         set_config(SEED=BASE_SEED + r)
         try:
             start_network(meta["num_nodes"])
@@ -286,120 +331,204 @@ def run_condition(meta, cfg, regen):
     log(f"  -> {len(rows)} Zeilen, gesamt {len(_all_rows)}.")
     return True
 
-def build_plan():
+ROUTING_EF_FIXED = 64
+
+def build_final_overlay_plan():
     plan = []
-    datasets = P.get("DATASETS", ["sift"])
+    t1, t2 = P["TIER1"], P["TIER2"]
 
-    if SMOKE_TEST:
-        for di, ds in enumerate(datasets):
-            total = _total_for(ds)
-            for routing in ["greedy", "flood", "iterative"]:
-                m = _meta("SMOKE", "clustered", routing, 10, total // 10, 0, True, "none", ds)
-                c = base_cfg(10, [2, 4], P["NUM_QUERIES"], total, DATASET=ds,
-                             **{VAR_ROUTING: routing}, **_iter(routing))
-                plan.append((m, c, False))
-            for es in [False, True]:
-                m = _meta("SMOKE_earlystop", "clustered", "greedy", 10, total // 10, 0, True, "none", ds)
-                m["early_stop"] = es
-                c = base_cfg(10, [4], P["NUM_QUERIES"], total, DATASET=ds,
-                             EARLY_STOP_ENABLED=es,
-                             EARLY_STOP_THRESHOLD=EARLY_STOP_THRESHOLDS.get(ds, 0.0))
-                plan.append((m, c, False))
-            if di == 0:
-                m = _meta("SMOKE_churn", "clustered", "greedy", 10, total // 10, 2, True, "none", ds)
-                c = base_cfg(10, [4], P["NUM_QUERIES"], total, DATASET=ds,
-                             FAULT_INJECTION_ENABLED=True, FAULT_MAX_DOWN=2, **FAULT_PROFILE)
-                plan.append((m, c, False))
-                m = _meta("SMOKE_latency", "clustered", "greedy", 10, total // 10, 0, True, "mid", ds)
-                c = base_cfg(10, [4], P["NUM_QUERIES_LATENCY"], total, DATASET=ds,
-                             TOXIPROXY_ENABLED=True, LATENCY_SCENARIO="mid")
-                plan.append((m, c, True))
-        return plan
+    def _nq(n):
+        return P["NUM_QUERIES"] if n <= 200 else P["NUM_QUERIES_LARGE"]
 
-    for ds in datasets:
-        total = _total_for(ds)
-        nb, vb = P["N_BASE"], total // P["N_BASE"]
+    anchor = dict(
+        ROUTING_STRATEGY="iterative", ROUTING_ALPHA=3, ROUTING_EF=ROUTING_EF_FIXED,
+        BOUNDED_VIEW=True, PEER_SHUFFLE=True, BIDIRECTIONAL_NEIGHBORS=True,
+        FARTHEST_ANCHOR=False, FAR_RANDOM_BIAS=False,
+        INCREMENTAL_START=True, LOOP_JITTER=True, FAILURE_STRIKES=3,
+        NUM_SEED_NODES=5, RANDOM_GOSSIP=False,
+        EXPLORE_FRACTION=0.667, MAX_NEIGHBORS_COEFF=2.0,
+        MEASURE_TOPOLOGY=True, PROTECT_SEED_EDGES=True,
+    )
 
-        for placement in ["clustered", "contiguous"]:
-            for routing in ["greedy", "random", "flood", "iterative"]:
-                m = _meta("ablation", placement, routing, nb, vb, 0, True, "none", ds)
-                c = base_cfg(nb, P["TTL_CORE"], P["NUM_QUERIES"], total, DATASET=ds,
-                             **{VAR_PLACEMENT: placement, VAR_ROUTING: routing}, **_iter(routing))
-                plan.append((m, c, False))
+    _old_rps = dict(BOUNDED_VIEW=False, PEER_SHUFFLE=False, RANDOM_GOSSIP=True,
+                    INCREMENTAL_START=False, LOOP_JITTER=False, FAILURE_STRIKES=1,
+                    NUM_SEED_NODES=1)
 
-        for n in P["N_LIST_SCALE"]:
-            for routing in ["greedy", "flood", "iterative"]:
-                m = _meta("scale", "clustered", routing, n, total // n, 0, True, "none", ds)
-                c = base_cfg(n, P["TTL_CORE"], P["NUM_QUERIES"], total, DATASET=ds,
-                             **{VAR_ROUTING: routing}, **_iter(routing))
-                plan.append((m, c, False))
+    def _derive_ttl(n, routing, ef, alpha):
+        nav = math.ceil(math.log2(n)) + 2
+        if routing in ("iterative", "greedy"):
+            budget = max(nav, math.ceil(3 * ef / alpha))
+            tag = "iter" if routing == "iterative" else "grd"
+            return budget, f"{tag}{budget}"
+        return nav, f"nav{nav}"
 
-        fmax = max(P["FAULT_LEVELS"]) or 4
-        for routing in ["greedy", "iterative"]:
-            for fmd in P["FAULT_LEVELS"]:
-                m = _meta("churn", "clustered", routing, nb, vb, fmd, True, "none", ds)
-                c = base_cfg(nb, P["TTL_CHURN"], P["NUM_QUERIES"], total, DATASET=ds,
-                             FAULT_INJECTION_ENABLED=(fmd > 0), FAULT_MAX_DOWN=fmd,
-                             **FAULT_PROFILE, **{VAR_ROUTING: routing}, **_iter(routing))
-                plan.append((m, c, False))
-            m = _meta("churn_repl_off", "clustered", routing, nb, vb, fmax, False, "none", ds)
-            c = base_cfg(nb, P["TTL_CHURN"], P["NUM_QUERIES"], total, DATASET=ds,
-                         REPLICATION=False, FAULT_INJECTION_ENABLED=True,
-                         FAULT_MAX_DOWN=fmax, **FAULT_PROFILE,
-                         **{VAR_ROUTING: routing}, **_iter(routing))
-            plan.append((m, c, False))
+    def _cell(block, n, ds, overrides, runs, fmd=0, scen="none", needs_tox=False, tot=None, **meta_kw):
+        tot = _total_for(ds) if tot is None else tot
+        routing = overrides.get("ROUTING_STRATEGY", "iterative")
+        ef = overrides.get("ROUTING_EF", anchor["ROUTING_EF"])
+        alpha = overrides.get("ROUTING_ALPHA", anchor["ROUTING_ALPHA"])
+        ttl, ttl_mode = _derive_ttl(n, routing, ef, alpha)
+        m = _meta(block, "clustered", routing, n, tot // n, fmd, True, scen, ds)
+        m["num_runs"] = runs
+        m["ttl_mode"] = ttl_mode
+        m["routing_ef"] = ef
+        m["rpc_timeout_s"] = overrides.get("RPC_TIMEOUT_BASE_S", RPC_TIMEOUT_BASE_S)
+        m.update(meta_kw)
+        c = base_cfg(n, [ttl], _nq(n), tot, DATASET=ds)
+        c.update(anchor)
+        c.update(overrides)
+        return (m, c, needs_tox)
 
-        for scen in ["none", "mid", "high"]:
-            for routing in ["greedy", "flood", "iterative"]:
-                m = _meta("latency", "clustered", routing, nb, vb, 0, True, scen, ds)
-                c = base_cfg(nb, P["TTL_LATENCY"], P["NUM_QUERIES_LATENCY"], total,
-                             DATASET=ds, TOXIPROXY_ENABLED=True, LATENCY_SCENARIO=scen,
-                             **{VAR_ROUTING: routing}, **_iter(routing))
-                plan.append((m, c, True))
+    _block_num     = {"routing": 1, "ablation": 2, "param": 3,
+                      "seeds": 4, "scaling": 5, "robustheit": 6,
+                      "vorstudie": 7, "warmup": 8,
+                      "ksweep": 9, "dichte": 10}
+    _active_blocks = P.get("FINAL_ACTIVE_BLOCKS", [1, 2, 3, 4, 5, 6])
+    _active_n      = P.get("FINAL_ACTIVE_N",      [200, 500, 750, 1000, 1250])
 
-        for fan in P["FANOUT_LIST"]:
-            m = _meta("fanout", "clustered", "greedy", nb, vb, 0, True, "none", ds)
-            m["fanout"] = fan
-            c = base_cfg(nb, P["TTL_CORE"], P["NUM_QUERIES"], total,
-                         DATASET=ds, **{VAR_FANOUT: fan})
-            plan.append((m, c, False))
+    def _add(cell):
+        m = cell[0]
+        if _block_num[m["block"]] in _active_blocks and m["num_nodes"] in _active_n:
+            plan.append(cell)
 
-        for w in P["WARMUP_LIST"]:
-            m = _meta("gossip", "clustered", "greedy", nb, vb, 0, True, "none", ds)
-            m["gossip_warmup_s"] = w
-            c = base_cfg(nb, [4], P["NUM_QUERIES"], total, DATASET=ds, **{VAR_WARMUP: w})
-            plan.append((m, c, False))
+    ROUTING_EF_BY_N = {50: 16, 200: 64}
+    router_strategies = [
+        ({}, t1),
+        ({"ROUTING_STRATEGY": "greedy", "ROUTING_FANOUT": 1}, t1),
+        ({"ROUTING_STRATEGY": "flood"}, t1),
+        ({"ROUTING_STRATEGY": "random"}, t1),
+    ]
+    large_n_strategies = [
+        ({}, t1),
+        ({"ROUTING_STRATEGY": "greedy", "ROUTING_FANOUT": 1}, t1),
+    ]
 
-        for pct in P["CONNDROP_LIST"]:
-            m = _meta("conndrop", "clustered", "greedy", nb, vb, 0, True, "none", ds)
-            m["conn_drop_pct"] = pct
-            c = base_cfg(nb, [4], P["NUM_QUERIES_LATENCY"], total,
-                         DATASET=ds, TOXIPROXY_ENABLED=True, **{VAR_CONNDROP: float(pct)})
-            plan.append((m, c, True))
+    ablation_arms = [
+        ("final",      {}),
+        ("old_rps",    _old_rps),
+        ("no_shuffle", {"PEER_SHUFFLE": False}),
+        ("no_bidir",   {"BIDIRECTIONAL_NEIGHBORS": False}),
+        ("unbounded",  {"BOUNDED_VIEW": False}),
+        ("with_far",   {"FAR_RANDOM_BIAS": True}),
+    ]
 
-        ttl_h = P["TTL_CORE"][len(P["TTL_CORE"]) // 2:]
-        for routing in ["greedy", "iterative"]:
-            for es in [False, True]:
-                m = _meta("earlystop", "clustered", routing, nb, vb, 0, True, "none", ds)
-                m["early_stop"] = es
-                c = base_cfg(nb, ttl_h, P["NUM_QUERIES"], total, DATASET=ds,
-                             EARLY_STOP_ENABLED=es,
-                             EARLY_STOP_THRESHOLD=EARLY_STOP_THRESHOLDS.get(ds, 0.0),
-                             **{VAR_ROUTING: routing}, **_iter(routing))
-                plan.append((m, c, False))
+    for n, ef in ROUTING_EF_BY_N.items():
+        for ds in ["ir", "sift"]:
+            for ov, runs in router_strategies:
+                overrides = dict(ov, ROUTING_EF=ef)
+                _add(_cell("routing", n, ds, overrides, runs))
+
+    for n in [500, 750, 1000, 1250]:
+        for ov, runs in large_n_strategies:
+            overrides = dict(ov, ROUTING_EF=64)
+            _add(_cell("routing", n, "ir", overrides, runs))
+
+    for k in [1, 10, 3]:
+        _add(_cell("ksweep", 1000, "ir", {"K": k, "ROUTING_EF": 64}, t1, arm=f"k{k}"))
+
+    for total in [40000, 20000]:
+        _add(_cell("dichte", 1000, "ir", {"ROUTING_EF": 64}, t1,
+                   tot=total, arm=f"v{total // 1000}"))
+
+    _add(_cell("ablation", 500, "ir", {"PROTECT_SEED_EDGES": False}, t1, arm="no_seedlock"))
+
+    for arm, ov in ablation_arms:
+        _add(_cell("ablation", 500, "ir", ov, t1, arm=arm))
+
+    _add(_cell("ablation", 1000, "ir", {"PEER_SHUFFLE": False}, t1, arm="no_shuffle"))
+    _add(_cell("ablation", 1000, "ir", {"PROTECT_SEED_EDGES": False}, t1, arm="no_seedlock"))
+
+    _add(_cell("param", 500, "ir", {}, t2, arm="anchor"))
+
+    for coeff in [1.0, 3.0]:
+        _add(_cell("param", 500, "ir", {"MAX_NEIGHBORS_COEFF": coeff}, t2,
+                          max_neighbors_coeff=coeff))
+    for ef in [30, 48, 96, 128]:
+        _add(_cell("param", 500, "ir", {"ROUTING_EF": ef}, t2))
+    for alpha in [1, 6, 9]:
+        _add(_cell("param", 500, "ir", {"ROUTING_ALPHA": alpha}, t2,
+                          routing_alpha=alpha))
+    for frac in [0.5, 0.75]:
+        _add(_cell("param", 500, "ir", {"EXPLORE_FRACTION": frac}, t2,
+                          explore_fraction=frac))
+
+    for seeds in [1, 5, 20]:
+        _add(_cell("seeds", 500, "ir", {"NUM_SEED_NODES": seeds}, t2,
+                          num_seed_nodes=seeds))
+
+    _add(_cell("robustheit", 500, "ir", {}, t1, arm="baseline"))
+
+    _fault = dict(FAULT_INJECTION_ENABLED=True, FAULT_KILL_INTERVAL=8.0,
+                  FAULT_KILL_PROBABILITY=0.4, FAULT_RESTART_DELAY=6.0)
+    for fmd in [25, 50]:
+        _add(_cell("robustheit", 500, "ir",
+                          dict(_fault, FAULT_MAX_DOWN=fmd), t1, fmd=fmd))
+    for scen in ["mid", "high"]:
+        _add(_cell("robustheit", 500, "ir",
+                          {"TOXIPROXY_ENABLED": True, "LATENCY_SCENARIO": scen}, t1,
+                          scen=scen, needs_tox=True))
+    for pct in [5.0, 10.0]:
+        _add(_cell("robustheit", 500, "ir",
+                          {"TOXIPROXY_ENABLED": True, "TOXIC_CONN_DROP_PCT": pct}, t1,
+                          needs_tox=True, conn_drop_pct=pct))
+    _add(_cell("robustheit", 500, "ir",
+                      dict(_fault, FAULT_MAX_DOWN=25, TOXIPROXY_ENABLED=True, LATENCY_SCENARIO="mid"),
+                      t1, fmd=25, scen="mid", needs_tox=True))
+
+    for seeds in [1, 5, 20]:
+        _add(_cell("seeds", 1000, "ir", {"NUM_SEED_NODES": seeds}, t2,
+                          num_seed_nodes=seeds))
+
+    _add(_cell("scaling", 1000, "ir", _old_rps, t2, arm="old_rps"))
+
+    _add(_cell("scaling", 1000, "ir", {"GOSSIP_WARMUP_S": 120}, t2, arm="warmup120"))
+
+    for seeds in [1, 5, 20]:
+        _add(_cell("seeds", 1250, "ir", {"NUM_SEED_NODES": seeds}, t2,
+                          num_seed_nodes=seeds))
+
+    _pilot_base = dict(BOUNDED_VIEW=False, PEER_SHUFFLE=False,
+                       INCREMENTAL_START=False, LOOP_JITTER=False,
+                       FAILURE_STRIKES=1, NUM_SEED_NODES=1)
+    vorstudie_arms = [
+        ("basis", dict(_pilot_base, BIDIRECTIONAL_NEIGHBORS=False, RANDOM_GOSSIP=False)),
+        ("rez",   dict(_pilot_base, BIDIRECTIONAL_NEIGHBORS=True,  RANDOM_GOSSIP=False)),
+        ("fern",  dict(_pilot_base, BIDIRECTIONAL_NEIGHBORS=False, RANDOM_GOSSIP=True)),
+        ("beide", dict(_pilot_base, BIDIRECTIONAL_NEIGHBORS=True,  RANDOM_GOSSIP=True)),
+    ]
+    for n in [100, 200]:
+        for arm, ov in vorstudie_arms:
+            _add(_cell("vorstudie", n, "ir", ov, t2, arm=arm))
+
+    def _add_warmup_cells():
+        for ws in [30, 60, 120, 240]:
+            _add(_cell("warmup", 1000, "ir", {"GOSSIP_WARMUP_S": ws}, t2,
+                              arm=f"anchor_w{ws}"))
+            _add(_cell("warmup", 1000, "ir",
+                              {"GOSSIP_WARMUP_S": ws, "PEER_SHUFFLE": False}, t2,
+                              arm=f"noshuffle_w{ws}"))
+
+    _add_warmup_cells()
 
     return plan
 
+
+def build_plan():
+    return build_final_overlay_plan()
+
 def _run_plan(plan):
-    last_n, last_ds, skipped = None, None, []
+    last_n, last_ds, last_vpn, skipped = None, None, None, []
     for meta, cfg, needs_tox in plan:
         if needs_tox and not toxiproxy_up():
             log(f"[{meta['block']}] uebersprungen (Toxiproxy nicht da).")
             skipped.append((meta, cfg, needs_tox))
             continue
-        regen = meta["num_nodes"] != last_n or meta["dataset"] != last_ds
+        regen = (meta["num_nodes"] != last_n
+                 or meta["dataset"] != last_ds
+                 or meta["vectors_per_node"] != last_vpn)
         if run_condition(meta, cfg, regen):
             last_n, last_ds = meta["num_nodes"], meta["dataset"]
+            last_vpn = meta["vectors_per_node"]
     return skipped
 
 def main():
@@ -410,11 +539,13 @@ def main():
     signal.signal(signal.SIGINT,  lambda s, f: (stop_network(), stop_toxiproxy(), sys.exit(1)))
     signal.signal(signal.SIGTERM, lambda s, f: (stop_network(), stop_toxiproxy(), sys.exit(1)))
 
-    start_toxiproxy()
-
     plan = build_plan()
     _total = len(plan)
-    log(f"Profil={PROFILE} SMOKE={SMOKE_TEST}  {_total} Bedingungen  "
+    if any(needs_tox for _, _, needs_tox in plan):
+        start_toxiproxy()
+    ns_in_plan = sorted({meta["num_nodes"] for meta, _, _ in plan})
+    log(f"RUN={RUN}  Bloecke={_RUN_BLOCKS}  N={ns_in_plan}  "
+        f"{_total} Bedingungen  CSV={os.path.basename(OUT_CSV)}  "
         f"Toxiproxy {'ok' if toxiproxy_up() else 'NICHT erreichbar'}.")
 
     skipped = _run_plan(plan)
